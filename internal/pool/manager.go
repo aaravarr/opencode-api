@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"opencode-api/internal/config"
+	"opencode-api/internal/console"
+	"opencode-api/internal/keystore"
 )
 
 var ErrNoAccount = errors.New("no usable account available")
@@ -32,11 +35,12 @@ type Lease struct {
 }
 
 type Manager struct {
-	mu        sync.Mutex
-	statePath string
-	pricing   map[string]config.ModelPrice
-	accounts  map[string]*runtimeAccount
-	order     []string
+	mu           sync.Mutex
+	statePath    string
+	keyStorePath string
+	pricing      map[string]config.ModelPrice
+	accounts     map[string]*runtimeAccount
+	order        []string
 }
 
 type runtimeAccount struct {
@@ -45,19 +49,25 @@ type runtimeAccount struct {
 }
 
 type AccountState struct {
-	ID                   string     `json:"id"`
-	Enabled              bool       `json:"enabled"`
-	RemainingCents       *float64   `json:"remaining_cents,omitempty"`
-	SpentCents           float64    `json:"spent_cents"`
-	UsedPromptTokens     int64      `json:"used_prompt_tokens"`
-	UsedCompletionTokens int64      `json:"used_completion_tokens"`
-	UsedCachedTokens     int64      `json:"used_cached_tokens"`
-	Requests             int64      `json:"requests"`
-	Successes            int64      `json:"successes"`
-	ConsecutiveFailures  int        `json:"consecutive_failures"`
-	CooldownUntil        *time.Time `json:"cooldown_until,omitempty"`
-	LastUsed             *time.Time `json:"last_used,omitempty"`
-	LastError            string     `json:"last_error,omitempty"`
+	ID                         string     `json:"id"`
+	Enabled                    bool       `json:"enabled"`
+	RemainingCents             *float64   `json:"remaining_cents,omitempty"`
+	RemoteBalanceCents         *float64   `json:"remote_balance_cents,omitempty"`
+	RemoteBudgetLimitCents     *float64   `json:"remote_budget_limit_cents,omitempty"`
+	RemoteBudgetSpentCents     *float64   `json:"remote_budget_spent_cents,omitempty"`
+	RemoteBudgetRemainingCents *float64   `json:"remote_budget_remaining_cents,omitempty"`
+	RemoteManagedStatus        string     `json:"remote_managed_status,omitempty"`
+	RemoteSyncedAt             *time.Time `json:"remote_synced_at,omitempty"`
+	SpentCents                 float64    `json:"spent_cents"`
+	UsedPromptTokens           int64      `json:"used_prompt_tokens"`
+	UsedCompletionTokens       int64      `json:"used_completion_tokens"`
+	UsedCachedTokens           int64      `json:"used_cached_tokens"`
+	Requests                   int64      `json:"requests"`
+	Successes                  int64      `json:"successes"`
+	ConsecutiveFailures        int        `json:"consecutive_failures"`
+	CooldownUntil              *time.Time `json:"cooldown_until,omitempty"`
+	LastUsed                   *time.Time `json:"last_used,omitempty"`
+	LastError                  string     `json:"last_error,omitempty"`
 }
 
 type persistedState struct {
@@ -65,31 +75,42 @@ type persistedState struct {
 }
 
 type AccountSnapshot struct {
-	ID                   string     `json:"id"`
-	Label                string     `json:"label,omitempty"`
-	Enabled              bool       `json:"enabled"`
-	HasKey               bool       `json:"has_key"`
-	KeySource            string     `json:"key_source"`
-	Priority             int        `json:"priority"`
-	RemainingCents       *float64   `json:"remaining_cents,omitempty"`
-	MonthlyBudgetCents   *float64   `json:"monthly_budget_cents,omitempty"`
-	SpentCents           float64    `json:"spent_cents"`
-	UsedPromptTokens     int64      `json:"used_prompt_tokens"`
-	UsedCompletionTokens int64      `json:"used_completion_tokens"`
-	UsedCachedTokens     int64      `json:"used_cached_tokens"`
-	Requests             int64      `json:"requests"`
-	Successes            int64      `json:"successes"`
-	ConsecutiveFailures  int        `json:"consecutive_failures"`
-	CooldownUntil        *time.Time `json:"cooldown_until,omitempty"`
-	LastUsed             *time.Time `json:"last_used,omitempty"`
-	LastError            string     `json:"last_error,omitempty"`
+	ID                         string     `json:"id"`
+	Label                      string     `json:"label,omitempty"`
+	AuthType                   string     `json:"auth_type,omitempty"`
+	Email                      string     `json:"email,omitempty"`
+	OrgID                      string     `json:"org_id,omitempty"`
+	OrgName                    string     `json:"org_name,omitempty"`
+	Enabled                    bool       `json:"enabled"`
+	HasKey                     bool       `json:"has_key"`
+	KeySource                  string     `json:"key_source"`
+	Priority                   int        `json:"priority"`
+	RemainingCents             *float64   `json:"remaining_cents,omitempty"`
+	RemoteBalanceCents         *float64   `json:"remote_balance_cents,omitempty"`
+	RemoteBudgetLimitCents     *float64   `json:"remote_budget_limit_cents,omitempty"`
+	RemoteBudgetSpentCents     *float64   `json:"remote_budget_spent_cents,omitempty"`
+	RemoteBudgetRemainingCents *float64   `json:"remote_budget_remaining_cents,omitempty"`
+	RemoteManagedStatus        string     `json:"remote_managed_status,omitempty"`
+	RemoteSyncedAt             *time.Time `json:"remote_synced_at,omitempty"`
+	MonthlyBudgetCents         *float64   `json:"monthly_budget_cents,omitempty"`
+	SpentCents                 float64    `json:"spent_cents"`
+	UsedPromptTokens           int64      `json:"used_prompt_tokens"`
+	UsedCompletionTokens       int64      `json:"used_completion_tokens"`
+	UsedCachedTokens           int64      `json:"used_cached_tokens"`
+	Requests                   int64      `json:"requests"`
+	Successes                  int64      `json:"successes"`
+	ConsecutiveFailures        int        `json:"consecutive_failures"`
+	CooldownUntil              *time.Time `json:"cooldown_until,omitempty"`
+	LastUsed                   *time.Time `json:"last_used,omitempty"`
+	LastError                  string     `json:"last_error,omitempty"`
 }
 
 func New(cfg *config.Config) (*Manager, error) {
 	m := &Manager{
-		statePath: cfg.Server.StatePath,
-		pricing:   cfg.Pricing,
-		accounts:  map[string]*runtimeAccount{},
+		statePath:    cfg.Server.StatePath,
+		keyStorePath: cfg.Server.KeyStorePath,
+		pricing:      cfg.Pricing,
+		accounts:     map[string]*runtimeAccount{},
 	}
 
 	st, err := loadState(cfg.Server.StatePath)
@@ -152,7 +173,28 @@ func (m *Manager) Select(exclude map[string]bool) (Lease, error) {
 		if exclude != nil && exclude[id] {
 			continue
 		}
-		if !acct.State.Enabled || acct.Config.APIKey == "" {
+		if !acct.State.Enabled {
+			continue
+		}
+		if acct.Config.AuthType == "oauth" && shouldRefreshOAuth(acct.Config.OAuthTokenExpiry) {
+			if err := m.refreshOAuthLocked(acct); err != nil {
+				acct.State.LastError = strings.TrimSpace(err.Error())
+				if len(acct.State.LastError) > 500 {
+					acct.State.LastError = acct.State.LastError[:500]
+				}
+				until := now.Add(10 * time.Minute)
+				acct.State.CooldownUntil = &until
+				_ = m.saveLocked()
+				continue
+			}
+		}
+		if acct.Config.AuthType == "oauth" && shouldSyncRemoteBalance(acct, now, false) {
+			if err := m.syncRemoteBalanceLocked(context.Background(), acct, now); err != nil {
+				acct.State.LastError = trimError("console balance sync: " + err.Error())
+				_ = m.saveLocked()
+			}
+		}
+		if acct.Config.APIKey == "" {
 			continue
 		}
 		if acct.State.CooldownUntil != nil && acct.State.CooldownUntil.After(now) {
@@ -197,27 +239,183 @@ func (m *Manager) Snapshot() []AccountSnapshot {
 		acct := m.accounts[id]
 		remaining := cloneFloat(m.remainingLocked(acct))
 		out = append(out, AccountSnapshot{
-			ID:                   acct.Config.ID,
-			Label:                acct.Config.Label,
-			Enabled:              acct.State.Enabled,
-			HasKey:               acct.Config.APIKey != "",
-			KeySource:            acct.Config.KeySource(),
-			Priority:             acct.Config.Priority,
-			RemainingCents:       remaining,
-			MonthlyBudgetCents:   cloneFloat(acct.Config.MonthlyBudgetCents),
-			SpentCents:           roundCents(acct.State.SpentCents),
-			UsedPromptTokens:     acct.State.UsedPromptTokens,
-			UsedCompletionTokens: acct.State.UsedCompletionTokens,
-			UsedCachedTokens:     acct.State.UsedCachedTokens,
-			Requests:             acct.State.Requests,
-			Successes:            acct.State.Successes,
-			ConsecutiveFailures:  acct.State.ConsecutiveFailures,
-			CooldownUntil:        acct.State.CooldownUntil,
-			LastUsed:             acct.State.LastUsed,
-			LastError:            acct.State.LastError,
+			ID:                         acct.Config.ID,
+			Label:                      acct.Config.DisplayLabel(),
+			AuthType:                   acct.Config.AuthType,
+			Email:                      acct.Config.Email,
+			OrgID:                      acct.Config.OrgID,
+			OrgName:                    acct.Config.OrgName,
+			Enabled:                    acct.State.Enabled,
+			HasKey:                     acct.Config.APIKey != "",
+			KeySource:                  acct.Config.KeySource(),
+			Priority:                   acct.Config.Priority,
+			RemainingCents:             remaining,
+			RemoteBalanceCents:         cloneFloat(acct.State.RemoteBalanceCents),
+			RemoteBudgetLimitCents:     cloneFloat(acct.State.RemoteBudgetLimitCents),
+			RemoteBudgetSpentCents:     cloneFloat(acct.State.RemoteBudgetSpentCents),
+			RemoteBudgetRemainingCents: cloneFloat(acct.State.RemoteBudgetRemainingCents),
+			RemoteManagedStatus:        acct.State.RemoteManagedStatus,
+			RemoteSyncedAt:             acct.State.RemoteSyncedAt,
+			MonthlyBudgetCents:         cloneFloat(acct.Config.MonthlyBudgetCents),
+			SpentCents:                 roundCents(acct.State.SpentCents),
+			UsedPromptTokens:           acct.State.UsedPromptTokens,
+			UsedCompletionTokens:       acct.State.UsedCompletionTokens,
+			UsedCachedTokens:           acct.State.UsedCachedTokens,
+			Requests:                   acct.State.Requests,
+			Successes:                  acct.State.Successes,
+			ConsecutiveFailures:        acct.State.ConsecutiveFailures,
+			CooldownUntil:              acct.State.CooldownUntil,
+			LastUsed:                   acct.State.LastUsed,
+			LastError:                  acct.State.LastError,
 		})
 	}
 	return out
+}
+
+func (m *Manager) SyncRemoteBalances(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	var errs []string
+	for _, id := range m.order {
+		acct := m.accounts[id]
+		if acct.Config.AuthType != "oauth" {
+			continue
+		}
+		if shouldRefreshOAuth(acct.Config.OAuthTokenExpiry) {
+			if err := m.refreshOAuthLocked(acct); err != nil {
+				acct.State.LastError = trimError("oauth refresh: " + err.Error())
+				errs = append(errs, acct.Config.ID+": "+err.Error())
+				continue
+			}
+		}
+		if err := m.syncRemoteBalanceLocked(ctx, acct, now); err != nil {
+			acct.State.LastError = trimError("console balance sync: " + err.Error())
+			errs = append(errs, acct.Config.ID+": "+err.Error())
+			continue
+		}
+	}
+	if err := m.saveLocked(); err != nil {
+		return err
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func shouldRefreshOAuth(expiry time.Time) bool {
+	if expiry.IsZero() {
+		return false
+	}
+	return time.Now().Add(5 * time.Minute).After(expiry)
+}
+
+func shouldSyncRemoteBalance(acct *runtimeAccount, now time.Time, force bool) bool {
+	if force {
+		return true
+	}
+	if acct.Config.APIKey == "" || acct.Config.OrgID == "" {
+		return false
+	}
+	if acct.State.RemoteSyncedAt == nil {
+		return true
+	}
+	return now.Sub(*acct.State.RemoteSyncedAt) >= remoteBalanceSyncInterval
+}
+
+func (m *Manager) refreshOAuthLocked(acct *runtimeAccount) error {
+	if acct.Config.OAuthRefreshToken == "" {
+		return errors.New("oauth refresh token is missing")
+	}
+	client, err := console.New(acct.Config.ConsoleURL)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	token, err := client.RefreshToken(ctx, acct.Config.OAuthRefreshToken)
+	if err != nil {
+		return err
+	}
+
+	acct.Config.APIKey = token.AccessToken
+	acct.Config.APIKeySource = "oauth:" + client.BaseURL()
+	acct.Config.OAuthRefreshToken = token.RefreshToken
+	acct.Config.OAuthTokenExpiry = token.ExpiresAt
+
+	rec := keystore.Record{
+		AuthType:         "oauth",
+		AccessToken:      token.AccessToken,
+		RefreshToken:     token.RefreshToken,
+		TokenExpiry:      token.ExpiresAt,
+		ConsoleURL:       client.BaseURL(),
+		ConsoleAccountID: acct.Config.ConsoleAccountID,
+		Email:            acct.Config.Email,
+		OrgID:            acct.Config.OrgID,
+		OrgName:          acct.Config.OrgName,
+		SourceURL:        client.BaseURL(),
+	}
+	return keystore.PutOAuth(m.keyStorePath, acct.Config.ID, rec)
+}
+
+func (m *Manager) syncRemoteBalanceLocked(ctx context.Context, acct *runtimeAccount, now time.Time) error {
+	if acct.Config.APIKey == "" {
+		return errors.New("oauth access token is missing")
+	}
+	if acct.Config.OrgID == "" {
+		return errors.New("oauth org id is missing")
+	}
+	client, err := console.New(acct.Config.ConsoleURL)
+	if err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	var candidates []float64
+	var partialErrs []string
+	if status, err := client.BillingStatus(syncCtx, acct.Config.APIKey, acct.Config.OrgID); err != nil {
+		partialErrs = append(partialErrs, "billing status: "+err.Error())
+	} else {
+		acct.State.RemoteManagedStatus = status.ManagedInferenceStatus
+		if remaining, ok := status.RemainingCents(); ok {
+			remaining = nonnegative(remaining)
+			acct.State.RemoteBalanceCents = &remaining
+			candidates = append(candidates, remaining)
+		}
+	}
+
+	if budget, ok, err := client.OrgBudget(syncCtx, acct.Config.APIKey, acct.Config.OrgID); err != nil {
+		partialErrs = append(partialErrs, "org budget: "+err.Error())
+	} else if ok {
+		limit := nonnegative(budget.LimitCents())
+		spent := nonnegative(budget.SpentCents())
+		remaining := nonnegative(budget.RemainingCents())
+		acct.State.RemoteBudgetLimitCents = &limit
+		acct.State.RemoteBudgetSpentCents = &spent
+		acct.State.RemoteBudgetRemainingCents = &remaining
+		candidates = append(candidates, remaining)
+	}
+
+	if len(candidates) == 0 {
+		if len(partialErrs) > 0 {
+			return errors.New(strings.Join(partialErrs, "; "))
+		}
+		acct.State.RemoteSyncedAt = &now
+		return nil
+	}
+	remaining := minFloat(candidates...)
+	acct.State.RemainingCents = &remaining
+	acct.State.RemoteSyncedAt = &now
+	if strings.HasPrefix(acct.State.LastError, "console balance sync:") {
+		acct.State.LastError = ""
+	}
+	return nil
 }
 
 func (m *Manager) ReportSuccess(id string, usage Usage) error {
@@ -437,6 +635,36 @@ func timeForSort(v *time.Time) time.Time {
 func roundCents(v float64) float64 {
 	return math.Round(v*10000) / 10000
 }
+
+func minFloat(values ...float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	minimum := values[0]
+	for _, value := range values[1:] {
+		if value < minimum {
+			minimum = value
+		}
+	}
+	return minimum
+}
+
+func nonnegative(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	return roundCents(value)
+}
+
+func trimError(message string) string {
+	message = strings.TrimSpace(message)
+	if len(message) > 500 {
+		return message[:500]
+	}
+	return message
+}
+
+const remoteBalanceSyncInterval = 5 * time.Minute
 
 const (
 	httpStatusPaymentRequired     = 402

@@ -243,6 +243,17 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"accounts": h.pool.Snapshot()})
 		return
 	}
+	if r.URL.Path == "/admin/accounts/sync" && r.Method == http.MethodPost {
+		status := http.StatusOK
+		body := map[string]any{"accounts": h.pool.Snapshot()}
+		if err := h.pool.SyncRemoteBalances(r.Context()); err != nil {
+			status = http.StatusMultiStatus
+			body["warning"] = err.Error()
+		}
+		body["accounts"] = h.pool.Snapshot()
+		writeJSON(w, status, body)
+		return
+	}
 
 	prefix := "/admin/accounts/"
 	if !strings.HasPrefix(r.URL.Path, prefix) {

@@ -194,6 +194,7 @@ func usage() {
   opencode-api server start|stop|status [-config config.json]
   opencode-api account add
   opencode-api account list
+  opencode-api account sync
   opencode-api account remove --id go-1
 
 Compatibility commands:

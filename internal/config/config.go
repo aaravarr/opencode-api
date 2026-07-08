@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"opencode-api/internal/keystore"
 )
@@ -49,15 +50,23 @@ type BrowserConfig struct {
 }
 
 type Account struct {
-	ID                 string   `json:"id"`
-	Label              string   `json:"label,omitempty"`
-	APIKey             string   `json:"api_key,omitempty"`
-	APIKeySource       string   `json:"-"`
-	APIKeyEnv          string   `json:"api_key_env,omitempty"`
-	Enabled            *bool    `json:"enabled,omitempty"`
-	Priority           int      `json:"priority,omitempty"`
-	RemainingCents     *float64 `json:"remaining_cents,omitempty"`
-	MonthlyBudgetCents *float64 `json:"monthly_budget_cents,omitempty"`
+	ID                 string    `json:"id"`
+	Label              string    `json:"label,omitempty"`
+	AuthType           string    `json:"auth_type,omitempty"`
+	APIKey             string    `json:"api_key,omitempty"`
+	APIKeySource       string    `json:"-"`
+	APIKeyEnv          string    `json:"api_key_env,omitempty"`
+	ConsoleURL         string    `json:"console_url,omitempty"`
+	ConsoleAccountID   string    `json:"console_account_id,omitempty"`
+	Email              string    `json:"email,omitempty"`
+	OrgID              string    `json:"org_id,omitempty"`
+	OrgName            string    `json:"org_name,omitempty"`
+	OAuthRefreshToken  string    `json:"-"`
+	OAuthTokenExpiry   time.Time `json:"-"`
+	Enabled            *bool     `json:"enabled,omitempty"`
+	Priority           int       `json:"priority,omitempty"`
+	RemainingCents     *float64  `json:"remaining_cents,omitempty"`
+	MonthlyBudgetCents *float64  `json:"monthly_budget_cents,omitempty"`
 }
 
 type ModelPrice struct {
@@ -135,8 +144,8 @@ func Default() *Config {
 		},
 		Browser: BrowserConfig{
 			DataDir:    filepath.Join("data", "browser"),
-			LoginURL:   "https://opencode.ai/auth",
-			ConsoleURL: "https://opencode.ai/auth",
+			LoginURL:   "https://console.opencode.ai",
+			ConsoleURL: "https://console.opencode.ai",
 		},
 		Accounts: []Account{},
 	}
@@ -191,7 +200,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Browser.DataDir = filepath.Join("data", "browser")
 	}
 	if cfg.Browser.LoginURL == "" {
-		cfg.Browser.LoginURL = "https://opencode.ai/auth"
+		cfg.Browser.LoginURL = "https://console.opencode.ai"
 	}
 	if cfg.Browser.ConsoleURL == "" {
 		cfg.Browser.ConsoleURL = cfg.Browser.LoginURL
@@ -237,7 +246,34 @@ func (cfg *Config) ResolveSecrets() error {
 			if rec, ok := store.Accounts[acct.ID]; ok && rec.APIKey != "" {
 				acct.APIKey = rec.APIKey
 				acct.APIKeySource = "store:" + cfg.Server.KeyStorePath
+				if acct.AuthType == "" {
+					acct.AuthType = "api_key"
+				}
+			} else if ok && (rec.AccessToken != "" || rec.RefreshToken != "") {
+				acct.APIKey = rec.AccessToken
+				acct.APIKeySource = "oauth:" + firstNonEmpty(rec.ConsoleURL, cfg.Browser.ConsoleURL)
+				acct.AuthType = "oauth"
+				acct.OAuthRefreshToken = rec.RefreshToken
+				acct.OAuthTokenExpiry = rec.TokenExpiry
+				if acct.ConsoleURL == "" {
+					acct.ConsoleURL = rec.ConsoleURL
+				}
+				if acct.ConsoleAccountID == "" {
+					acct.ConsoleAccountID = rec.ConsoleAccountID
+				}
+				if acct.Email == "" {
+					acct.Email = rec.Email
+				}
+				if acct.OrgID == "" {
+					acct.OrgID = rec.OrgID
+				}
+				if acct.OrgName == "" {
+					acct.OrgName = rec.OrgName
+				}
 			}
+		}
+		if acct.AuthType == "" {
+			acct.AuthType = "api_key"
 		}
 	}
 	return nil
@@ -276,6 +312,28 @@ func (a Account) KeySource() string {
 		return a.APIKeySource
 	}
 	return "missing"
+}
+
+func (a Account) DisplayLabel() string {
+	if a.Label != "" {
+		return a.Label
+	}
+	if a.OrgName != "" && a.Email != "" {
+		return a.OrgName + " (" + a.Email + ")"
+	}
+	if a.Email != "" {
+		return a.Email
+	}
+	return a.ID
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func randomToken(prefix string) string {

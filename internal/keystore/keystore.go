@@ -15,9 +15,18 @@ type Store struct {
 }
 
 type Record struct {
-	APIKey    string    `json:"api_key"`
-	SourceURL string    `json:"source_url,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
+	APIKey           string    `json:"api_key,omitempty"`
+	AuthType         string    `json:"auth_type,omitempty"`
+	AccessToken      string    `json:"access_token,omitempty"`
+	RefreshToken     string    `json:"refresh_token,omitempty"`
+	TokenExpiry      time.Time `json:"token_expiry,omitempty"`
+	ConsoleURL       string    `json:"console_url,omitempty"`
+	ConsoleAccountID string    `json:"console_account_id,omitempty"`
+	Email            string    `json:"email,omitempty"`
+	OrgID            string    `json:"org_id,omitempty"`
+	OrgName          string    `json:"org_name,omitempty"`
+	SourceURL        string    `json:"source_url,omitempty"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 func Load(path string) (*Store, error) {
@@ -56,7 +65,7 @@ func Get(path, accountID string) (Record, bool, error) {
 		return Record{}, false, err
 	}
 	rec, ok := store.Accounts[accountID]
-	return rec, ok && rec.APIKey != "", nil
+	return rec, ok && (rec.APIKey != "" || rec.AccessToken != "" || rec.RefreshToken != ""), nil
 }
 
 func Put(path, accountID, apiKey, sourceURL string) error {
@@ -69,9 +78,25 @@ func Put(path, accountID, apiKey, sourceURL string) error {
 	store.Updated = now
 	store.Accounts[accountID] = Record{
 		APIKey:    apiKey,
+		AuthType:  "api_key",
 		SourceURL: sourceURL,
 		UpdatedAt: now,
 	}
+	return Save(path, store)
+}
+
+func PutOAuth(path, accountID string, rec Record) error {
+	store, err := Load(path)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	rec.APIKey = ""
+	rec.AuthType = "oauth"
+	rec.UpdatedAt = now
+	store.Version = 1
+	store.Updated = now
+	store.Accounts[accountID] = rec
 	return Save(path, store)
 }
 

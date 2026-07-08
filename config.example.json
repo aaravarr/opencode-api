@@ -16,8 +16,8 @@
   },
   "browser": {
     "data_dir": "data/browser",
-    "login_url": "https://opencode.ai/auth",
-    "console_url": "https://opencode.ai/auth"
+    "login_url": "https://console.opencode.ai",
+    "console_url": "https://console.opencode.ai"
   },
   "accounts": []
 }
