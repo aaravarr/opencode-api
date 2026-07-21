@@ -14,8 +14,9 @@ import {
   workspaceIdFromUrl,
 } from "./lib/state.js";
 
-const OPENCODE_GOOGLE_AUTHORIZE_URL = "https://auth.opencode.ai/google/authorize";
-const OPENCODE_GITHUB_AUTHORIZE_URL = "https://auth.opencode.ai/github/authorize";
+// 统一从 opencode.ai/auth/authorize 入口进入，让 auth.opencode.ai 正常建立会话状态。
+// provider 参数由 content script 读取后自动选择 Google 或 GitHub。
+const OPENCODE_AUTHORIZE_URL = "https://opencode.ai/auth/authorize?continue=/auth&ocg_flow=1";
 const LOGIN_WINDOW = Object.freeze({ width: 520, height: 720 });
 let submissionInFlight = null;
 
@@ -106,7 +107,7 @@ async function startLogin(provider = "google") {
       message: "请先完成后端配置。",
     });
   }
-  const loginUrl = provider === "github" ? OPENCODE_GITHUB_AUTHORIZE_URL : OPENCODE_GOOGLE_AUTHORIZE_URL;
+  const loginUrl = `${OPENCODE_AUTHORIZE_URL}#provider=${provider}`;
   const label = provider === "github" ? "GitHub" : "Google";
   const current = await chrome.windows.getCurrent();
   const left = Number.isFinite(current.left) && Number.isFinite(current.width)

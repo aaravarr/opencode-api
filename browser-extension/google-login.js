@@ -1,13 +1,10 @@
 (() => {
   if (location.origin !== "https://auth.opencode.ai") return;
 
-  // 自动选择登录方式：优先匹配 URL 中的 provider 提示，否则默认 Google。
-  // 同时处理 Google 和 GitHub 两种 provider 入口。
+  // 从 URL hash 读取插件指定的 provider，默认 google
   const provider = (() => {
     try {
-      const url = new URL(location.href);
-      const seg = url.pathname.split("/")[1];
-      if (seg === "github") return "github";
+      if (location.hash.includes("provider=github")) return "github";
     } catch { /* ignore */ }
     return "google";
   })();
