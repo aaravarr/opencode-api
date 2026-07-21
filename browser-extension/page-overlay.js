@@ -184,6 +184,9 @@
     lastPhase = null;
   }
 
+  // 只有这些关键节点才弹 toast，过渡状态（detecting、ready）不打扰用户
+  const TOAST_PHASES = new Set([PHASE.AWAITING_LOGIN, PHASE.SUBMITTING, PHASE.SUCCESS, PHASE.ERROR]);
+
   function applyUpdate(state) {
     if (!state) return;
     const prevPhase = lastPhase;
@@ -191,8 +194,10 @@
     // 只在录入流程中（flowActive=true）才显示窗口和弹 toast
     if (state.flowActive) {
       mount();
-      if (state.phase && state.phase !== prevPhase) {
+      if (state.phase && state.phase !== prevPhase && TOAST_PHASES.has(state.phase)) {
         lastPhase = state.phase;
+        // 弹新 toast 前清空旧的，避免堆积看不明白
+        toastStack.innerHTML = "";
         pushToast(state.phase, state.message);
       } else {
         lastPhase = state.phase;
