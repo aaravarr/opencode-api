@@ -141,9 +141,6 @@ async function saveConfig(input) {
   const incomingKey = String(input?.apiKey ?? "").trim();
   const apiKey = incomingKey ? validateApiKey(incomingKey) : existing?.apiKey;
   if (!apiKey) throw new Error("请输入后端 API Key");
-  const originPattern = `${new URL(backendUrl).origin}/*`;
-  const allowed = await chrome.permissions.contains({ origins: [originPattern] });
-  if (!allowed) throw new Error("尚未授予后端地址访问权限，请点击「授权访问权限」按钮先授权");
   await chrome.storage.local.set({
     [CONFIG_STORAGE_KEY]: { backendUrl, apiKey },
   });
@@ -155,13 +152,6 @@ async function saveConfig(input) {
     });
   }
   return viewModel();
-}
-
-async function requestBackendPermission(backendUrl) {
-  const normalized = normalizeBackendUrl(backendUrl);
-  const originPattern = `${new URL(normalized).origin}/*`;
-  const granted = await chrome.permissions.request({ origins: [originPattern] });
-  return { granted, backendUrl: normalized };
 }
 
 async function clearConfig() {
@@ -319,8 +309,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         return submitConnection(true);
       case "SAVE_CONFIG":
         return saveConfig(message.payload);
-      case "REQUEST_PERMISSION":
-        return requestBackendPermission(message.payload?.backendUrl);
       case "CLEAR_CONFIG":
         return clearConfig();
       case "OPEN_OPTIONS":

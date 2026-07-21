@@ -65,35 +65,22 @@ async function detectBackendTab() {
   } catch { /* ignore */ }
 }
 
-// 前置申请后端地址的访问权限（在保存前完成，避免保存时弹权限且清空表单）
-$("grant-permission").addEventListener("click", async () => {
-  const btn = $("grant-permission");
-  const hint = $("config-status");
-  const raw = $("backend-url").value.trim();
-  if (!raw) { hint.textContent = "请先填写后端地址"; return; }
-  btn.disabled = true;
-  try {
-    const result = await send("REQUEST_PERMISSION", { backendUrl: raw });
-    if (result?.granted) {
-      hint.textContent = "已授权，可以保存配置了。";
-      // 授权成功后回填规范化地址
-      if (result?.backendUrl) $("backend-url").value = result.backendUrl;
-    } else {
-      hint.textContent = "未授权，无法上报账号。";
-    }
-  } catch (error) {
-    hint.textContent = error.message || "授权失败";
-  } finally {
-    btn.disabled = false;
-  }
-});
-
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const hint = $("config-status");
   hint.textContent = "正在保存…";
   try {
     const backendUrl = normalizeBackendUrl($("backend-url").value);
+    const originPattern = `${new URL(backendUrl).origin}/*`;
+    // 在用户手势（点击保存）中检查并请求权限，避免单独弹授权
+    const hasPermission = await chrome.permissions.contains({ origins: [originPattern] });
+    if (!hasPermission) {
+      const granted = await chrome.permissions.request({ origins: [originPattern] });
+      if (!granted) {
+        hint.textContent = "需要后端地址访问权限才能上报账号，请重试并允许。";
+        return;
+      }
+    }
     render(await send("SAVE_CONFIG", { backendUrl, apiKey: $("api-key").value }));
     // 保存成功后才清空 API Key 输入框（保留后端地址）
     $("api-key").value = "";
