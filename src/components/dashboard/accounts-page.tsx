@@ -215,7 +215,7 @@ export function AccountsPage() {
         ) : null}
       </Panel>
 
-      <ConnectorSheet open={connectorOpen} onOpenChange={setConnectorOpen} />
+      <ConnectorSheet open={connectorOpen} onOpenChange={setConnectorOpen} downloadInfo={downloadInfo} />
       <AccountDetailSheet
         account={selected}
         onOpenChange={(open) => { if (!open) setSelected(null); }}
@@ -228,7 +228,7 @@ export function AccountsPage() {
   );
 }
 
-function ConnectorSheet({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+function ConnectorSheet({ open, onOpenChange, downloadInfo }: { open: boolean; onOpenChange: (open: boolean) => void; downloadInfo: { version: string | null; downloadUrl: string } | null }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85dvh] gap-0 overflow-hidden p-0 sm:max-w-lg">
@@ -237,14 +237,22 @@ function ConnectorSheet({ open, onOpenChange }: { open: boolean; onOpenChange: (
           <DialogDescription>Google 登录发生在你的浏览器中，后端不会接触 Google 密码。</DialogDescription>
         </DialogHeader>
         <div className="max-h-[calc(85dvh-160px)] space-y-3 overflow-y-auto px-5 py-6">
-          <ConnectorStep index="01" icon={Puzzle} title="加载插件" description="在 Chrome / Edge 扩展管理页开启开发者模式，加载项目中的 browser-extension 目录。" />
-          <ConnectorStep index="02" icon={KeyRound} title="配置连接" description="填写本系统的访问地址，以及当前用户在“API 密钥”页面创建的统一入口 Key。" />
+          <ConnectorStep index="01" icon={Puzzle} title="下载并加载插件" description="下载插件压缩包并解压，在 Chrome / Edge 扩展管理页开启开发者模式，选择“加载已解压的扩展程序”指向解压后的目录。">
+            {downloadInfo ? (
+              <Button variant="outline" size="sm" asChild className="mt-2 w-fit">
+                <a href={downloadInfo.downloadUrl} target="_blank" rel="noopener noreferrer" download>
+                  <Download data-icon="inline-start" />下载插件{downloadInfo.version ? ` v${downloadInfo.version}` : ""}
+                </a>
+              </Button>
+            ) : null}
+          </ConnectorStep>
+          <ConnectorStep index="02" icon={KeyRound} title="配置连接" description="打开插件，填写本系统的访问地址，以及当前用户在“API 密钥”页面创建的统一入口 Key。" />
           <ConnectorStep index="03" icon={Star} title="使用 Google 登录" description="点击插件中的 Google 登录。完成 OpenCode 授权并进入 workspace 后，插件会自动上报并同步额度。" />
           <div className="mt-5 rounded-md border border-info/20 bg-info-soft px-4 py-3 text-xs leading-5 text-muted-foreground">
             后端会查找名为 <code className="font-mono text-foreground">OpenCode to API</code> 的 Go Key；已存在则复用，否则自动创建。Cookie 和完整 Go Key 只会加密保存在后端。
           </div>
         </div>
-        <DialogFooter className="border-t bg-[#fafafa] px-5 py-4 sm:justify-start">
+        <DialogFooter className="mb-0 border-t bg-[#fafafa] px-5 py-4 sm:mx-0 sm:justify-start">
           <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
         </DialogFooter>
       </DialogContent>
@@ -252,11 +260,11 @@ function ConnectorSheet({ open, onOpenChange }: { open: boolean; onOpenChange: (
   );
 }
 
-function ConnectorStep({ index, icon: Icon, title, description }: { index: string; icon: typeof Puzzle; title: string; description: string }) {
+function ConnectorStep({ index, icon: Icon, title, description, children }: { index: string; icon: typeof Puzzle; title: string; description: string; children?: React.ReactNode }) {
   return (
     <section className="grid grid-cols-[36px_minmax(0,1fr)] gap-3 rounded-md border bg-[#fafafa] p-4">
       <span className="grid size-9 place-items-center rounded-md border bg-white"><Icon className="size-4" strokeWidth={1.75} aria-hidden="true" /></span>
-      <div><p className="font-mono text-[9px] text-muted-foreground">STEP {index}</p><h3 className="mt-1 text-sm font-medium">{title}</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p></div>
+      <div><p className="font-mono text-[9px] text-muted-foreground">STEP {index}</p><h3 className="mt-1 text-sm font-medium">{title}</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p>{children}</div>
     </section>
   );
 }
@@ -312,7 +320,7 @@ function AccountDetailSheet({ account, onOpenChange, onPreferred, onToggle, onRe
                 </div>
               </DetailSection>
             </div>
-            <DialogFooter className="flex-row flex-wrap border-t bg-[#fafafa] px-5 py-4 sm:justify-start">
+            <DialogFooter className="mb-0 flex-row flex-wrap border-t bg-[#fafafa] px-5 py-4 sm:mx-0 sm:justify-start">
               <Button variant="outline" onClick={() => void onRefresh(account)} disabled={busy}><RefreshCw className={busy ? "animate-spin" : undefined} data-icon="inline-start" />{busy ? "同步中" : "立即同步"}</Button>
               <Button variant="outline" onClick={() => void onToggle(account)} disabled={busy}>{account.adminState === "DISABLED" ? "启用账号" : "停用账号"}</Button>
               <Button onClick={() => void onPreferred(account)} disabled={busy}><Star data-icon="inline-start" />设为优先</Button>
