@@ -21,6 +21,7 @@ import { useAdminResource } from "./use-admin-resource";
 import type { LogsCleanupResponse } from "./types";
 
 interface Settings {
+  githubProxyUrl: string;
   upstreamBaseUrl: string;
   upstreamRequestTimeoutMs: number;
   maintenanceEnabled: boolean;
@@ -162,6 +163,14 @@ export function SettingsPage() {
             description="Go API Key 调用的官方上游地址。"
           >
             <div className="grid gap-5 p-4 sm:p-5 lg:grid-cols-2">
+              <Field label="GitHub 代理地址" description="用于检查插件更新和下载。留空则直连 GitHub。如 http://127.0.0.1:7890">
+                <Input
+                  type="url"
+                  value={form.githubProxyUrl}
+                  onChange={(e) => update("githubProxyUrl", e.target.value)}
+                  placeholder="留空则直连 GitHub"
+                />
+              </Field>
               <Field label="请求上游地址">
                 <Input
                   type="url"
@@ -388,14 +397,17 @@ export function SettingsPage() {
 
 function Field({
   label,
+  description,
   children,
 }: {
   label: string;
+  description?: string;
   children: React.ReactNode;
 }) {
   return (
     <div className="space-y-2">
       <Label>{label}</Label>
+      {description ? <p className="text-xs leading-4 text-muted-foreground">{description}</p> : null}
       {children}
     </div>
   );

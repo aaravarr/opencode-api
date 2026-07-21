@@ -3,6 +3,7 @@ import { getDatabase, type AppDatabase } from "./db";
 import { SecretVault } from "./crypto";
 
 export const SYSTEM_SETTING_KEYS = {
+  githubProxyUrl: "github_proxy_url",
   upstreamBaseUrl: "opencode_upstream_base_url",
   upstreamRequestTimeoutMs: "upstream_request_timeout_ms",
   maintenanceIntervalMs: "maintenance_interval_ms",
@@ -33,6 +34,7 @@ export type SystemSecretKey =
   (typeof SYSTEM_SECRET_KEYS)[keyof typeof SYSTEM_SECRET_KEYS];
 
 export interface SystemSettings {
+  githubProxyUrl: string;
   upstreamBaseUrl: string;
   upstreamRequestTimeoutMs: number;
   maintenanceEnabled: boolean;
@@ -42,6 +44,7 @@ export interface SystemSettings {
 }
 
 export interface UpdateSystemSettingsInput {
+  githubProxyUrl?: string;
   upstreamBaseUrl?: string;
   upstreamRequestTimeoutMs?: number;
   maintenanceEnabled?: boolean;
@@ -64,6 +67,7 @@ export interface LogSettings {
 }
 
 const defaults: SystemSettings & LogSettings = {
+  githubProxyUrl: "",
   upstreamBaseUrl: "https://opencode.ai/zen/go/v1",
   upstreamRequestTimeoutMs: 120_000,
   maintenanceEnabled: true,
@@ -87,6 +91,12 @@ export function initializeSystemSettings(db: AppDatabase): void {
   );
   const vault = new SecretVault();
   db.transaction(() => {
+    insert.run(
+      SYSTEM_SETTING_KEYS.githubProxyUrl,
+      JSON.stringify(defaults.githubProxyUrl),
+      0,
+      now,
+    );
     insert.run(
       SYSTEM_SETTING_KEYS.upstreamBaseUrl,
       JSON.stringify(defaults.upstreamBaseUrl),
@@ -182,6 +192,7 @@ export function getSystemSettings(
   db: AppDatabase = getDatabase(),
 ): SystemSettings {
   return {
+    githubProxyUrl: readPublic(db, SYSTEM_SETTING_KEYS.githubProxyUrl, defaults.githubProxyUrl),
     upstreamBaseUrl: readPublic(
       db,
       SYSTEM_SETTING_KEYS.upstreamBaseUrl,
@@ -221,6 +232,13 @@ export function updateSystemSettings(
   db: AppDatabase = getDatabase(),
 ): SystemSettings {
   const entries: [string, string][] = [];
+  if (input.githubProxyUrl !== undefined) {
+    const proxy = input.githubProxyUrl.trim();
+    if (proxy) {
+      try { new URL(proxy) } catch { throw new Error("GitHub 代理地址不是有效 URL") }
+    }
+    entries.push([SYSTEM_SETTING_KEYS.githubProxyUrl, JSON.stringify(proxy)]);
+  }
   if (input.upstreamBaseUrl !== undefined)
     entries.push([
       SYSTEM_SETTING_KEYS.upstreamBaseUrl,

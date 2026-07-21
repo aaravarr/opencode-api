@@ -3,6 +3,7 @@ import { getLogSettings, getPublicSecretStatus, getSystemSettings, updateSystemS
 import { requireAdministrator } from "../_auth";
 export const runtime = "nodejs";
 const schema = z.object({
+  githubProxyUrl: z.string().trim().max(500).optional(),
   upstreamBaseUrl: z.url(),
   upstreamRequestTimeoutMs: z.number().int().min(1000).max(600000),
   maintenanceEnabled: z.boolean(),

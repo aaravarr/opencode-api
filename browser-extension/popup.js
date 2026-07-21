@@ -141,17 +141,41 @@ async function loadBackendUrl() {
   }
 }
 
+const GITHUB_REPO = "aaravarr/opencode-api";
+const ASSET_NAME = "opencode-go-connector.zip";
+
+async function fetchLatestFromGithub() {
+  const response = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
+    headers: { Accept: "application/vnd.github+json" },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok) throw new Error(`GitHub API ${response.status}`);
+  const data = await response.json();
+  const tag = String(data.tag_name || "");
+  const version = tag.replace(/^v/i, "");
+  const asset = (data.assets || []).find((a) => a.name === ASSET_NAME);
+  return {
+    version: version || null,
+    downloadUrl: asset?.browser_download_url || `https://github.com/${GITHUB_REPO}/releases/latest/download/${ASSET_NAME}`,
+    releaseUrl: data.html_url || `https://github.com/${GITHUB_REPO}/releases/latest`,
+  };
+}
+
 async function runUpdateCheck() {
   const btn = $("check-update");
   const label = $("update-status");
   btn.disabled = true;
   label.textContent = "正在检查更新…";
   try {
-    const backendUrl = await loadBackendUrl();
+    // 优先直接查 GitHub API，不依赖后端代理；失败再试后端 /api/extension/latest
     let info = null;
-    if (backendUrl) {
-      const response = await fetch(`${backendUrl}/api/extension/latest`, { headers: { Accept: "application/json" } });
-      if (response.ok) info = await response.json().catch(() => null);
+    try { info = await fetchLatestFromGithub(); }
+    catch {
+      const backendUrl = await loadBackendUrl();
+      if (backendUrl) {
+        const response = await fetch(`${backendUrl}/api/extension/latest`, { headers: { Accept: "application/json" } });
+        if (response.ok) info = await response.json().catch(() => null);
+      }
     }
     if (!info) throw new Error("无法获取版本信息");
     if (!info.version) {
@@ -171,7 +195,7 @@ async function runUpdateCheck() {
     });
   } catch (error) {
     label.innerHTML = `${error.message || "检查更新失败"}。可前往 <button class="text-button" id="open-manual-release" type="button">GitHub Release 页面</button> 手动查看。`;
-    $("open-manual-release")?.addEventListener("click", () => chrome.tabs.create({ url: "https://github.com/aaravarr/opencode-api/releases/latest" }));
+    $("open-manual-release")?.addEventListener("click", () => chrome.tabs.create({ url: `https://github.com/${GITHUB_REPO}/releases/latest` }));
   } finally {
     btn.disabled = false;
   }
