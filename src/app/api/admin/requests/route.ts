@@ -1,0 +1,104 @@
+import { getDatabase } from "@/server/db";
+import { requireSession } from "../_auth";
+
+export const runtime = "nodejs";
+
+interface RequestRow {
+  id: string;
+  endpoint: string;
+  model: string | null;
+  status: number | null;
+  outcome: string | null;
+  ok: number | null;
+  stream: number | null;
+  api_key_prefix: string | null;
+  account_id: string | null;
+  account_name: string | null;
+  attempt_count: number;
+  started_at: string;
+  completed_at: string | null;
+  latency_ms: number | null;
+  first_token_ms: number | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  cached_tokens: number | null;
+  reasoning_tokens: number | null;
+  text_tokens: number | null;
+  image_tokens: number | null;
+  audio_tokens: number | null;
+  client: string | null;
+  error: string | null;
+  has_request: number | null;
+  has_response: number | null;
+}
+
+function mapRequest(row: RequestRow) {
+  return {
+    id: row.id,
+    endpoint: row.endpoint,
+    createdAt: row.started_at,
+    model: row.model,
+    stream: Boolean(row.stream),
+    status: row.status,
+    outcome: row.outcome,
+    ok: row.ok === 1,
+    apiKeyPrefix: row.api_key_prefix,
+    accountId: row.account_id,
+    accountName: row.account_name,
+    attemptCount: row.attempt_count,
+    latencyMs: row.latency_ms,
+    firstTokenMs: row.first_token_ms,
+    promptTokens: row.prompt_tokens,
+    inputTokens: row.prompt_tokens,
+    completionTokens: row.completion_tokens,
+    outputTokens: row.completion_tokens,
+    totalTokens: row.total_tokens,
+    cachedTokens: row.cached_tokens,
+    reasoningTokens: row.reasoning_tokens,
+    textTokens: row.text_tokens,
+    imageTokens: row.image_tokens,
+    audioTokens: row.audio_tokens,
+    hasRequest: row.has_request === 1,
+    hasResponse: row.has_response === 1,
+    client: row.client,
+    error: row.error,
+  };
+}
+
+function parsePositiveInt(value: string | null, fallback: number, max: number): number {
+  if (value === null) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return Math.min(max, Math.round(parsed));
+}
+
+export function GET(request: Request): Response {
+  const user = requireSession(request);
+  if (user instanceof Response) return user;
+  const url = new URL(request.url);
+  const page = parsePositiveInt(url.searchParams.get("page"), 1, 10_000);
+  const pageSize = parsePositiveInt(url.searchParams.get("pageSize"), 20, 100);
+  const okParam = url.searchParams.get("ok");
+  const statusParam = url.searchParams.get("status");
+  const model = url.searchParams.get("model");
+  const q = url.searchParams.get("q");
+
+  const conditions = ["g.owner_user_id = ?"];
+  const params: (string | number)[] = [user.id];
+  if (okParam === "true" || okParam === "1") { conditions.push("g.ok = 1") }
+  else if (okParam === "false" || okParam === "0") { conditions.push("g.ok = 0") }
+  if (statusParam) {
+    const statusNum = Number(statusParam);
+    if (Number.isFinite(statusNum)) { conditions.push("g.status = ?"); params.push(statusNum) }
+  }
+  if (model) { conditions.push("g.model LIKE ?"); params.push(`%${model}%`) }
+  if (q) { conditions.push("(g.endpoint LIKE ? OR g.error LIKE ?)"); params.push(`%${q}%`, `%${q}%`) }
+
+  const db = getDatabase();
+  const where = conditions.join(" AND ");
+  const total = Number((db.prepare(`SELECT COUNT(*) AS value FROM gateway_requests g WHERE ${where}`).get(...params) as { value: number }).value);
+  const rows = db.prepare(`SELECT g.id,g.endpoint,g.model,g.status,g.outcome,g.ok,g.stream,g.api_key_prefix,g.account_id,g.account_name,g.attempt_count,g.started_at,g.completed_at,g.latency_ms,g.first_token_ms,g.prompt_tokens,g.completion_tokens,g.total_tokens,g.cached_tokens,g.reasoning_tokens,g.text_tokens,g.image_tokens,g.audio_tokens,g.client,g.error,rb.has_request,rb.has_response FROM gateway_requests g LEFT JOIN request_bodies rb ON rb.request_id = g.id WHERE ${where} ORDER BY g.started_at DESC LIMIT ? OFFSET ?`)
+    .all(...params, pageSize, (page - 1) * pageSize) as RequestRow[];
+  return Response.json({ items: rows.map(mapRequest), total, page, pageSize });
+}

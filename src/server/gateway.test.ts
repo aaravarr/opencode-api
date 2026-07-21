@@ -85,3 +85,67 @@ describe("gateway", () => {
     expect(response.status).toBe(413); expect(fetcher).not.toHaveBeenCalled()
   })
 })
+
+describe("gateway logging", () => {
+  beforeEach(() => { process.env.TOKEN_ENCRYPTION_KEY = encryptionKey })
+
+  async function drain(response: Response): Promise<void> {
+    await response.text()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+
+  it("非流式成功请求写入 token 用量与账号快照", async () => {
+    const { db, apiKey, credentials, hasher } = setup()
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ id: "ok", usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }))
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "responses")
+    await drain(response)
+    const row = db.prepare("SELECT ok,status,account_id,account_name,prompt_tokens,completion_tokens,total_tokens,latency_ms FROM gateway_requests ORDER BY started_at DESC LIMIT 1").get() as { ok: number; status: number; account_id: string; account_name: string; prompt_tokens: number; completion_tokens: number; total_tokens: number; latency_ms: number | null }
+    expect(row.ok).toBe(1)
+    expect(row.status).toBe(200)
+    expect(row.account_id).not.toBeNull()
+    expect(row.account_name).not.toBeNull()
+    expect(row.prompt_tokens).toBe(10)
+    expect(row.completion_tokens).toBe(5)
+    expect(row.total_tokens).toBe(15)
+    expect(row.latency_ms).not.toBeNull()
+  })
+
+  it("失败响应在 logBodiesOnError 开启时落盘请求与响应体", async () => {
+    const { db, apiKey, credentials, hasher } = setup()
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { type: "RateLimitError", message: "too many" } }), { status: 429 }))
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "responses")
+    await drain(response)
+    const body = db.prepare("SELECT has_request,has_response,response_body_json FROM request_bodies ORDER BY created_at DESC LIMIT 1").get() as { has_request: number; has_response: number; response_body_json: string }
+    expect(body.has_request).toBe(1)
+    expect(body.has_response).toBe(1)
+    expect(body.response_body_json).toContain("RateLimitError")
+    const req = db.prepare("SELECT ok,error FROM gateway_requests ORDER BY started_at DESC LIMIT 1").get() as { ok: number; error: string | null }
+    expect(req.ok).toBe(0)
+    expect(req.error).toContain("too many")
+  })
+
+  it("loggingEnabled 关闭时不写 request_bodies", async () => {
+    const { db, apiKey, credentials, hasher } = setup()
+    db.prepare("INSERT INTO system_settings(key,value_json,is_secret,updated_at) VALUES ('logging_enabled','false',0,?)").run(new Date().toISOString())
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { type: "RateLimitError" } }), { status: 429 }))
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "responses")
+    await drain(response)
+    expect((db.prepare("SELECT COUNT(*) value FROM request_bodies").get() as { value: number }).value).toBe(0)
+  })
+
+  it("流式响应解析 SSE usage 并写入 token", async () => {
+    const { db, apiKey, credentials, hasher } = setup()
+    const encoder = new TextEncoder()
+    const sse = `data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: {"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}\n\n`
+    const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(encoder.encode(sse)); controller.close() } })
+    const fetcher = vi.fn().mockResolvedValue(new Response(stream, { headers: { "content-type": "text/event-stream" } }))
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "responses")
+    await drain(response)
+    const row = db.prepare("SELECT ok,stream,prompt_tokens,completion_tokens,total_tokens FROM gateway_requests ORDER BY started_at DESC LIMIT 1").get() as { ok: number; stream: number; prompt_tokens: number; completion_tokens: number; total_tokens: number }
+    expect(row.ok).toBe(1)
+    expect(row.stream).toBe(0)
+    expect(row.prompt_tokens).toBe(12)
+    expect(row.completion_tokens).toBe(8)
+    expect(row.total_tokens).toBe(20)
+  })
+})

@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS gateway_requests (
   completed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS gateway_requests_owner_idx ON gateway_requests(owner_user_id, started_at);
+CREATE INDEX IF NOT EXISTS gateway_requests_time_idx ON gateway_requests(owner_user_id, started_at DESC);
 
 CREATE TABLE IF NOT EXISTS gateway_attempts (
   id TEXT PRIMARY KEY,
@@ -156,6 +157,19 @@ CREATE TABLE IF NOT EXISTS gateway_attempts (
   error_type TEXT,
   started_at TEXT NOT NULL,
   completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS gateway_attempts_request_idx ON gateway_attempts(request_id);
+
+CREATE TABLE IF NOT EXISTS request_bodies (
+  request_id TEXT PRIMARY KEY REFERENCES gateway_requests(id) ON DELETE CASCADE,
+  request_body_json TEXT,
+  response_body_json TEXT,
+  request_headers_json TEXT,
+  request_truncated INTEGER NOT NULL DEFAULT 0,
+  response_truncated INTEGER NOT NULL DEFAULT 0,
+  has_request INTEGER NOT NULL DEFAULT 0,
+  has_response INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -185,6 +199,7 @@ export function createDatabase(filename: string): AppDatabase {
   resetLegacyAccountDomain(db)
   db.exec(schema)
   ensureCurrentAccountColumns(db)
+  ensureCurrentGatewayRequestColumns(db)
   return db
 }
 
@@ -198,6 +213,46 @@ function ensureCurrentAccountColumns(db: AppDatabase): void {
   ] as const
   for (const [name, definition] of additions) {
     if (!existing.has(name)) db.exec(`ALTER TABLE accounts ADD COLUMN ${name} ${definition}`)
+  }
+}
+
+function ensureCurrentGatewayRequestColumns(db: AppDatabase): void {
+  const requestCols = new Set((db.prepare("PRAGMA table_info(gateway_requests)").all() as { name: string }[]).map((column) => column.name))
+  const requestAdditions = [
+    ["stream", "INTEGER NOT NULL DEFAULT 0"],
+    ["api_key_prefix", "TEXT"],
+    ["account_id", "TEXT"],
+    ["account_name", "TEXT"],
+    ["ok", "INTEGER NOT NULL DEFAULT 0"],
+    ["latency_ms", "INTEGER"],
+    ["local_prep_ms", "INTEGER"],
+    ["first_token_ms", "INTEGER"],
+    ["error", "TEXT"],
+    ["client", "TEXT"],
+    ["user_agent", "TEXT"],
+    ["origin", "TEXT"],
+    ["request_size_bytes", "INTEGER"],
+    ["response_size_bytes", "INTEGER"],
+    ["prompt_tokens", "INTEGER"],
+    ["completion_tokens", "INTEGER"],
+    ["total_tokens", "INTEGER"],
+    ["cached_tokens", "INTEGER"],
+    ["reasoning_tokens", "INTEGER"],
+    ["text_tokens", "INTEGER"],
+    ["image_tokens", "INTEGER"],
+    ["audio_tokens", "INTEGER"],
+  ] as const
+  for (const [name, definition] of requestAdditions) {
+    if (!requestCols.has(name)) db.exec(`ALTER TABLE gateway_requests ADD COLUMN ${name} ${definition}`)
+  }
+  const attemptCols = new Set((db.prepare("PRAGMA table_info(gateway_attempts)").all() as { name: string }[]).map((column) => column.name))
+  const attemptAdditions = [
+    ["latency_ms", "INTEGER"],
+    ["error_message", "TEXT"],
+    ["account_name", "TEXT"],
+  ] as const
+  for (const [name, definition] of attemptAdditions) {
+    if (!attemptCols.has(name)) db.exec(`ALTER TABLE gateway_attempts ADD COLUMN ${name} ${definition}`)
   }
 }
 
@@ -216,7 +271,7 @@ function resetLegacyAccountDomain(db: AppDatabase): void {
   }
 }
 
-const CURRENT_ACCOUNT_SCHEMA_VERSION = 2
+const CURRENT_ACCOUNT_SCHEMA_VERSION = 3
 const globalDatabase = globalThis as typeof globalThis & {
   __opencodeApiDb?: AppDatabase
   __opencodeApiAccountSchemaVersion?: number
@@ -234,6 +289,7 @@ export function getDatabase(): AppDatabase {
   // connection on the previous table shape.
   if (globalDatabase.__opencodeApiAccountSchemaVersion !== CURRENT_ACCOUNT_SCHEMA_VERSION) {
     ensureCurrentAccountColumns(globalDatabase.__opencodeApiDb)
+    ensureCurrentGatewayRequestColumns(globalDatabase.__opencodeApiDb)
     globalDatabase.__opencodeApiAccountSchemaVersion = CURRENT_ACCOUNT_SCHEMA_VERSION
   }
   return globalDatabase.__opencodeApiDb

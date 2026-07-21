@@ -9,7 +9,20 @@ export const SYSTEM_SETTING_KEYS = {
   maintenanceEnabled: "maintenance_enabled",
   refreshBatchLimit: "refresh_batch_limit",
   refreshConcurrency: "refresh_concurrency",
+  loggingEnabled: "logging_enabled",
+  logBodies: "log_bodies",
+  logBodiesOnError: "log_bodies_on_error",
+  logRetentionDays: "log_retention_days",
+  maxBodyCaptureBytes: "max_body_capture_bytes",
 } as const;
+
+export const LOG_SETTING_KEYS = [
+  SYSTEM_SETTING_KEYS.loggingEnabled,
+  SYSTEM_SETTING_KEYS.logBodies,
+  SYSTEM_SETTING_KEYS.logBodiesOnError,
+  SYSTEM_SETTING_KEYS.logRetentionDays,
+  SYSTEM_SETTING_KEYS.maxBodyCaptureBytes,
+] as const;
 
 export const SYSTEM_SECRET_KEYS = {
   apiKeyPepper: "api_key_pepper",
@@ -35,15 +48,33 @@ export interface UpdateSystemSettingsInput {
   maintenanceIntervalMs?: number;
   refreshBatchLimit?: number;
   refreshConcurrency?: number;
+  loggingEnabled?: boolean;
+  logBodies?: boolean;
+  logBodiesOnError?: boolean;
+  logRetentionDays?: number;
+  maxBodyCaptureBytes?: number;
 }
 
-const defaults: SystemSettings = {
+export interface LogSettings {
+  loggingEnabled: boolean;
+  logBodies: boolean;
+  logBodiesOnError: boolean;
+  logRetentionDays: number;
+  maxBodyCaptureBytes: number;
+}
+
+const defaults: SystemSettings & LogSettings = {
   upstreamBaseUrl: "https://opencode.ai/zen/go/v1",
   upstreamRequestTimeoutMs: 120_000,
   maintenanceEnabled: true,
   maintenanceIntervalMs: 60_000,
   refreshBatchLimit: 25,
   refreshConcurrency: 3,
+  loggingEnabled: true,
+  logBodies: false,
+  logBodiesOnError: true,
+  logRetentionDays: 7,
+  maxBodyCaptureBytes: 1_048_576,
 };
 
 type SettingRow = { value_json: string; is_secret: number };
@@ -104,7 +135,47 @@ export function initializeSystemSettings(db: AppDatabase): void {
       1,
       now,
     );
+    insert.run(
+      SYSTEM_SETTING_KEYS.loggingEnabled,
+      JSON.stringify(defaults.loggingEnabled),
+      0,
+      now,
+    );
+    insert.run(
+      SYSTEM_SETTING_KEYS.logBodies,
+      JSON.stringify(defaults.logBodies),
+      0,
+      now,
+    );
+    insert.run(
+      SYSTEM_SETTING_KEYS.logBodiesOnError,
+      JSON.stringify(defaults.logBodiesOnError),
+      0,
+      now,
+    );
+    insert.run(
+      SYSTEM_SETTING_KEYS.logRetentionDays,
+      JSON.stringify(defaults.logRetentionDays),
+      0,
+      now,
+    );
+    insert.run(
+      SYSTEM_SETTING_KEYS.maxBodyCaptureBytes,
+      JSON.stringify(defaults.maxBodyCaptureBytes),
+      0,
+      now,
+    );
   })();
+}
+
+export function getLogSettings(db: AppDatabase = getDatabase()): LogSettings {
+  return {
+    loggingEnabled: readPublic(db, SYSTEM_SETTING_KEYS.loggingEnabled, defaults.loggingEnabled),
+    logBodies: readPublic(db, SYSTEM_SETTING_KEYS.logBodies, defaults.logBodies),
+    logBodiesOnError: readPublic(db, SYSTEM_SETTING_KEYS.logBodiesOnError, defaults.logBodiesOnError),
+    logRetentionDays: readPublic(db, SYSTEM_SETTING_KEYS.logRetentionDays, defaults.logRetentionDays),
+    maxBodyCaptureBytes: readPublic(db, SYSTEM_SETTING_KEYS.maxBodyCaptureBytes, defaults.maxBodyCaptureBytes),
+  };
 }
 
 export function getSystemSettings(
@@ -200,6 +271,29 @@ export function updateSystemSettings(
       SYSTEM_SETTING_KEYS.refreshConcurrency,
       JSON.stringify(
         integerInRange(input.refreshConcurrency, 1, 32, "Refresh concurrency"),
+      ),
+    ]);
+  }
+  if (input.loggingEnabled !== undefined) {
+    entries.push([SYSTEM_SETTING_KEYS.loggingEnabled, JSON.stringify(input.loggingEnabled)]);
+  }
+  if (input.logBodies !== undefined) {
+    entries.push([SYSTEM_SETTING_KEYS.logBodies, JSON.stringify(input.logBodies)]);
+  }
+  if (input.logBodiesOnError !== undefined) {
+    entries.push([SYSTEM_SETTING_KEYS.logBodiesOnError, JSON.stringify(input.logBodiesOnError)]);
+  }
+  if (input.logRetentionDays !== undefined) {
+    entries.push([
+      SYSTEM_SETTING_KEYS.logRetentionDays,
+      JSON.stringify(integerInRange(input.logRetentionDays, 1, 365, "Log retention days")),
+    ]);
+  }
+  if (input.maxBodyCaptureBytes !== undefined) {
+    entries.push([
+      SYSTEM_SETTING_KEYS.maxBodyCaptureBytes,
+      JSON.stringify(
+        integerInRange(input.maxBodyCaptureBytes, 1024, 16_777_216, "Max body capture bytes"),
       ),
     ]);
   }

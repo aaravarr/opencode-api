@@ -87,17 +87,127 @@ export interface RouteAttempt {
 
 export interface RequestRecord {
   id: string;
+  endpoint?: string | null;
   createdAt?: string | null;
   model?: string | null;
-  apiKeyPrefix?: string | null;
+  stream?: boolean;
   status?: string | number | null;
+  outcome?: string | null;
+  ok?: boolean;
+  apiKeyPrefix?: string | null;
   accountId?: string | null;
   accountName?: string | null;
+  attemptCount?: number | null;
   attempts?: RouteAttempt[] | null;
   latencyMs?: number | null;
+  firstTokenMs?: number | null;
+  promptTokens?: number | null;
   inputTokens?: number | null;
+  completionTokens?: number | null;
   outputTokens?: number | null;
+  totalTokens?: number | null;
+  cachedTokens?: number | null;
+  reasoningTokens?: number | null;
+  textTokens?: number | null;
+  imageTokens?: number | null;
+  audioTokens?: number | null;
+  hasRequest?: boolean;
+  hasResponse?: boolean;
+  client?: string | null;
   error?: string | null;
+}
+
+export interface AttemptDetail {
+  id: string;
+  attemptNumber: number;
+  accountId?: string | null;
+  accountName?: string | null;
+  status?: number | null;
+  decision?: string;
+  errorType?: string | null;
+  errorMessage?: string | null;
+  latencyMs?: number | null;
+  startedAt: string;
+  completedAt?: string | null;
+}
+
+export interface RequestDetail {
+  request: RequestRecord & {
+    request?: unknown;
+    requestTruncated?: boolean;
+    response?: unknown;
+    responseTruncated?: boolean;
+    headers?: Record<string, string>;
+    userAgent?: string | null;
+    error?: string | null;
+    localPrepMs?: number | null;
+    requestSizeBytes?: number | null;
+    responseSizeBytes?: number | null;
+  };
+  attempts: AttemptDetail[];
+}
+
+export interface RequestListResponse {
+  items: RequestRecord[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface Bucket {
+  key: string;
+  label: string;
+  requests: number;
+  ok: number;
+  fail: number;
+  latencySum: number;
+  firstTokenSum: number;
+  firstTokenCount: number;
+  tpsSampleCount: number;
+  genLatencySum: number;
+  genTokensForTps: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cachedTokens: number;
+  reasoningTokens: number;
+}
+
+export interface UsageSummary {
+  requests: number;
+  ok: number;
+  fail: number;
+  avgLatencyMs: number;
+  avgFirstTokenMs: number | null;
+  avgTps: number;
+  tpsSampleCount: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cachedTokens: number;
+  reasoningTokens: number;
+}
+
+export interface UsageStats {
+  summary: UsageSummary;
+  byTime: Bucket[];
+  byModel: Bucket[];
+  byAccount: Bucket[];
+  byKey: Bucket[];
+}
+
+export interface LogSettings {
+  loggingEnabled: boolean;
+  logBodies: boolean;
+  logBodiesOnError: boolean;
+  logRetentionDays: number;
+  maxBodyCaptureBytes: number;
+}
+
+export interface LogsCleanupResponse {
+  deletedRequests?: number;
+  deletedBodies?: number;
+  stripped?: number;
 }
 
 export interface EventRecord {
@@ -123,4 +233,35 @@ export interface AdminSettings {
   activeQuotaCheckSeconds?: number | null;
   idleQuotaCheckMinutes?: number | null;
   requestLogRetentionDays?: number | null;
+  loggingEnabled?: boolean;
+  logBodies?: boolean;
+  logBodiesOnError?: boolean;
+  logRetentionDays?: number;
+  maxBodyCaptureBytes?: number;
+}
+
+export interface OverviewPayload {
+  counts?: {
+    totalAccounts?: number;
+    readyAccounts?: number;
+    quotaBlocked?: number;
+    inactiveAccounts?: number;
+    apiKeys?: number;
+  };
+  stats?: {
+    totalAccounts?: number;
+    availableAccounts?: number;
+    coolingAccounts?: number;
+    unavailableAccounts?: number;
+  };
+  routing?: {
+    currentAccountName?: string | null;
+    currentAccountId?: string | null;
+    preferredAccountName?: string | null;
+    preferredAccountId?: string | null;
+    nextRecoveryAt?: string | null;
+  };
+  recentRequests?: RequestRecord[];
+  recentEvents?: EventRecord[];
+  recentAttempts?: Record<string, AttemptDetail[]>;
 }

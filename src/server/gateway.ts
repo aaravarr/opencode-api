@@ -4,14 +4,37 @@ import { getDatabase } from "./db"
 import { ApiKeyHasher } from "./crypto"
 import { authenticateApiKey } from "./repository"
 import { NoEligibleAccountError, RoutingService } from "./routing"
-import { getSystemSettings } from "./settings"
+import { getLogSettings, getSystemSettings, type LogSettings } from "./settings"
 import type { QuotaKind } from "./types"
+import { collectRequestHeaders } from "./client-meta"
+import { captureJsonResponse, ensureStreamUsage, extractBodyError, extractUsage, isLogOk, safeCloneBody, teeAndCapture, type CaptureResult, type TokenUsage } from "./capture"
 
 export interface AccessCredential { accountId: string; goApiKey: string; credentialVersion: number }
 export interface CredentialProvider { get(ownerUserId: string, accountId: string): Promise<AccessCredential> }
 
 type GoLimit = { kind: QuotaKind; retryAfterSeconds: number | null }
 const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
+const MAX_ERROR_CHARS = 500
+
+interface RequestFinalizeInput {
+  status: number
+  outcome: string
+  attempts: number
+  ok?: number
+  latencyMs?: number
+  localPrepMs?: number
+  firstTokenMs?: number
+  error?: string | null
+  accountId?: string | null
+  accountName?: string | null
+  responseSizeBytes?: number | null
+  usage?: TokenUsage
+  logSettings?: LogSettings
+  requestBodyJson?: unknown
+  responseBody?: unknown
+  responseTruncated?: boolean
+  meta?: { headers: Record<string, string> }
+}
 
 async function readRequestBody(request: Request): Promise<Uint8Array<ArrayBuffer> | null> {
   if (request.method === "GET") return null
@@ -40,6 +63,16 @@ async function readRequestBody(request: Request): Promise<Uint8Array<ArrayBuffer
 
 function errorType(body: string): string | null {
   try { const parsed = JSON.parse(body) as { error?: { type?: unknown } }; return typeof parsed.error?.type === "string" ? parsed.error.type : null } catch { return null }
+}
+
+function safeParse(body: string): unknown {
+  if (!body) return undefined
+  try { return JSON.parse(body) } catch { return undefined }
+}
+
+function truncateError(value: string | null | undefined): string | null {
+  if (!value) return null
+  return value.length > MAX_ERROR_CHARS ? value.slice(0, MAX_ERROR_CHARS) : value
 }
 
 function parseRetryAfter(response: Response): number | null {
@@ -121,6 +154,7 @@ export class GatewayService {
   constructor(private readonly credentials: CredentialProvider, readonly db: AppDatabase = getDatabase(), private readonly fetcher: typeof fetch = fetch, private readonly keyHasher?: ApiKeyHasher) {}
 
   async handle(request: Request, endpoint: string): Promise<Response> {
+    const t0 = Date.now()
     const auth = request.headers.get("authorization")
     const plaintext = auth?.startsWith("Bearer ") ? auth.slice(7) : request.headers.get("x-api-key") ?? ""
     const apiKey = plaintext ? authenticateApiKey(plaintext, this.db, this.keyHasher) : null
@@ -133,16 +167,33 @@ export class GatewayService {
     if (request.method !== "GET" && requestBytes === null) return Response.json({ error: { type: "request_too_large", message: "Request body exceeds 10 MiB" } }, { status: 413 })
 
     let model: string | null = null
+    let stream = false
+    let requestBodyJson: unknown = undefined
     if (requestBytes?.length) {
-      try { const parsed = JSON.parse(new TextDecoder().decode(requestBytes)) as { model?: unknown }; if (typeof parsed.model === "string") model = parsed.model } catch { /* Upstream validates. */ }
+      try {
+        const parsed = JSON.parse(new TextDecoder().decode(requestBytes)) as { model?: unknown; stream?: unknown }
+        if (typeof parsed.model === "string") model = parsed.model
+        if (parsed.stream === true) stream = true
+        requestBodyJson = parsed
+      } catch { /* Upstream validates. */ }
     }
     const inferenceRequest = request.method !== "GET" && endpoint !== "models"
     if (inferenceRequest && apiKey.allowedModels?.length && !model) return Response.json({ error: { type: "model_required", message: "A string model is required for restricted API keys" } }, { status: 400 })
     if (apiKey.allowedModels?.length && model && !apiKey.allowedModels.includes(model)) return Response.json({ error: { type: "model_not_allowed", message: "This API key cannot use the requested model" } }, { status: 403 })
 
+    const logSettings = getLogSettings(this.db)
+    const logging = logSettings.loggingEnabled
+    const meta = collectRequestHeaders(request.headers)
+
+    let upstreamBytes: Uint8Array<ArrayBuffer> | null = requestBytes
+    if (stream && logging && requestBodyJson && typeof requestBodyJson === "object") {
+      const rewritten = ensureStreamUsage(requestBodyJson)
+      upstreamBytes = new TextEncoder().encode(JSON.stringify(rewritten))
+    }
+
     const routing = new RoutingService(apiKey.ownerUserId, this.db)
-    this.db.prepare("INSERT INTO gateway_requests(id,owner_user_id,api_key_id,endpoint,model,started_at) VALUES(?,?,?,?,?,?)")
-      .run(requestId, apiKey.ownerUserId, apiKey.id, endpoint, model, new Date().toISOString())
+    this.db.prepare("INSERT INTO gateway_requests(id,owner_user_id,api_key_id,endpoint,model,started_at,stream,api_key_prefix,client,user_agent,origin,request_size_bytes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(requestId, apiKey.ownerUserId, apiKey.id, endpoint, model, new Date().toISOString(), Number(stream), apiKey.prefix, meta.client, meta.userAgent, meta.origin, requestBytes?.byteLength ?? 0)
     const tried = new Set<string>()
     let attemptNumber = 0
 
@@ -154,7 +205,7 @@ export class GatewayService {
           const status = exhausted ? 429 : 503
           const headers = exhausted && cause.retryAfterSeconds ? { "retry-after": String(cause.retryAfterSeconds) } : undefined
           const type = exhausted ? "all_go_accounts_exhausted" : "no_eligible_account"
-          this.finishRequest(requestId, status, type, attemptNumber)
+          this.finalizeRequest(requestId, { status, outcome: type, attempts: attemptNumber, ok: 0, latencyMs: Date.now() - t0, localPrepMs: 0, error: type, logSettings, requestBodyJson, meta })
           return Response.json({ error: { type, message: exhausted ? "All OpenCode Go accounts are currently quota-limited." : "No eligible OpenCode Go account is available.", ...(cause.retryAfterSeconds ? { retry_after: cause.retryAfterSeconds } : {}) } }, { status, headers })
         }
         throw cause
@@ -162,15 +213,17 @@ export class GatewayService {
 
       attemptNumber += 1
       const attemptId = randomUUID()
-      this.db.prepare("INSERT INTO gateway_attempts(id,owner_user_id,request_id,account_id,attempt_number,started_at) VALUES(?,?,?,?,?,?)")
-        .run(attemptId, apiKey.ownerUserId, requestId, selection.account.id, attemptNumber, new Date().toISOString())
+      const attemptStartedAt = Date.now()
+      this.db.prepare("INSERT INTO gateway_attempts(id,owner_user_id,request_id,account_id,attempt_number,started_at,account_name) VALUES(?,?,?,?,?,?,?)")
+        .run(attemptId, apiKey.ownerUserId, requestId, selection.account.id, attemptNumber, new Date().toISOString(), selection.account.name)
+      const upstreamStartedAt = Date.now()
       try {
         const credential = await this.credentials.get(apiKey.ownerUserId, selection.account.id)
         const path = endpoint.replace(/^\/+/, "")
         const upstream = await this.fetcher(`${selection.target.baseUrl}/${path}`, {
           method: request.method,
           headers: upstreamHeaders(request, credential.goApiKey, endpoint),
-          body: requestBytes,
+          body: upstreamBytes,
           redirect: "error",
           signal: AbortSignal.any([request.signal, AbortSignal.timeout(getSystemSettings(this.db).upstreamRequestTimeoutMs)]),
         })
@@ -180,13 +233,16 @@ export class GatewayService {
           if (limit) {
             tried.add(selection.account.id)
             routing.markQuota(selection.account.id, limit.kind, limit.retryAfterSeconds)
-            this.finishAttempt(attemptId, upstream.status, "RETRY_NEXT_ACCOUNT", "GoUsageLimitError")
+            this.finishAttempt(attemptId, upstream.status, "RETRY_NEXT_ACCOUNT", "GoUsageLimitError", Date.now() - attemptStartedAt, "GoUsageLimitError", selection.account.name)
             continue
           }
           const type = errorType(body)
-          this.finishAttempt(attemptId, upstream.status, "RETURN_DIRECTLY", type)
-          this.finishRequest(requestId, upstream.status, type ?? "upstream_error", attemptNumber)
-          return new Response(body, { status: upstream.status, headers: responseHeaders(upstream.headers) })
+          const parsed = safeParse(body)
+          const bodyError = extractBodyError(parsed) ?? null
+          const status = upstream.status
+          this.finishAttempt(attemptId, status, "RETURN_DIRECTLY", type, Date.now() - attemptStartedAt, bodyError, selection.account.name)
+          this.finalizeRequest(requestId, { status, outcome: type ?? "upstream_error", attempts: attemptNumber, ok: isLogOk(status, bodyError) ? 1 : 0, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, error: bodyError, accountId: selection.account.id, accountName: selection.account.name, responseSizeBytes: body.length, usage: extractUsage(parsed), logSettings, requestBodyJson, responseBody: parsed, responseTruncated: false, meta })
+          return new Response(body, { status, headers: responseHeaders(upstream.headers) })
         }
 
         const contentType = upstream.headers.get("content-type") ?? ""
@@ -196,24 +252,84 @@ export class GatewayService {
           const limit = first.text.includes("GoUsageLimitError") ? classifyFirstSseEvent(upstream.headers, first.text) : null
           if (limit) {
             await reader.cancel(); tried.add(selection.account.id); routing.markQuota(selection.account.id, limit.kind, limit.retryAfterSeconds)
-            this.finishAttempt(attemptId, 429, "RETRY_NEXT_ACCOUNT", "GoUsageLimitError")
+            this.finishAttempt(attemptId, 429, "RETRY_NEXT_ACCOUNT", "GoUsageLimitError", Date.now() - attemptStartedAt, "GoUsageLimitError", selection.account.name)
             continue
           }
           routing.markSuccess(selection.account.id)
-          this.finishAttempt(attemptId, upstream.status, "SUCCESS", null); this.finishRequest(requestId, upstream.status, "SUCCESS", attemptNumber)
-          return new Response(prependChunk(first.bytes, reader), { status: upstream.status, headers: responseHeaders(upstream.headers) })
+          const rebuilt = prependChunk(first.bytes, reader)
+          const firstTokenAt = Date.now()
+          const status = upstream.status
+          if (logging) {
+            const onComplete = (r: CaptureResult) => {
+              const latencyMs = Date.now() - t0
+              const firstTokenMs = firstTokenAt - upstreamStartedAt
+              this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, r.error ?? null, selection.account.name)
+              this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: isLogOk(status, r.error) ? 1 : 0, latencyMs, localPrepMs: upstreamStartedAt - t0, firstTokenMs, usage: r.usage, error: r.error, accountId: selection.account.id, accountName: selection.account.name, responseSizeBytes: r.responseBytes ?? null, logSettings, requestBodyJson, responseBody: r.response, responseTruncated: r.responseTruncated, meta })
+            }
+            return new Response(teeAndCapture(rebuilt, onComplete), { status, headers: responseHeaders(upstream.headers) })
+          }
+          this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, null, selection.account.name)
+          this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: 1, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta })
+          return new Response(rebuilt, { status, headers: responseHeaders(upstream.headers) })
         }
         routing.markSuccess(selection.account.id)
-        this.finishAttempt(attemptId, upstream.status, "SUCCESS", null); this.finishRequest(requestId, upstream.status, "SUCCESS", attemptNumber)
-        return new Response(upstream.body, { status: upstream.status, headers: responseHeaders(upstream.headers) })
+        const status = upstream.status
+        if (logging && upstream.body) {
+          const onComplete = (r: CaptureResult) => {
+            const latencyMs = Date.now() - t0
+            this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, r.error ?? null, selection.account.name)
+            this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: isLogOk(status, r.error) ? 1 : 0, latencyMs, localPrepMs: upstreamStartedAt - t0, usage: r.usage, error: r.error, accountId: selection.account.id, accountName: selection.account.name, responseSizeBytes: r.responseBytes ?? null, logSettings, requestBodyJson, responseBody: r.response, responseTruncated: r.responseTruncated, meta })
+          }
+          return new Response(captureJsonResponse(upstream.body, onComplete), { status, headers: responseHeaders(upstream.headers) })
+        }
+        this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, null, selection.account.name)
+        this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: 1, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta })
+        return new Response(upstream.body, { status, headers: responseHeaders(upstream.headers) })
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : "Upstream request failed"
-        this.finishAttempt(attemptId, 502, "RETURN_DIRECTLY", "NETWORK"); this.finishRequest(requestId, 502, "NETWORK", attemptNumber)
+        this.finishAttempt(attemptId, 502, "RETURN_DIRECTLY", "NETWORK", Date.now() - attemptStartedAt, message, selection.account.name)
+        this.finalizeRequest(requestId, { status: 502, outcome: "NETWORK", attempts: attemptNumber, ok: 0, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, error: message, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta })
         return Response.json({ error: { type: "upstream_transport_error", message } }, { status: 502 })
       } finally { routing.releaseLease(selection.leaseId) }
     }
   }
 
-  private finishAttempt(id: string, status: number, decision: string, error: string | null) { this.db.prepare("UPDATE gateway_attempts SET status=?,decision=?,error_type=?,completed_at=? WHERE id=?").run(status, decision, error, new Date().toISOString(), id) }
-  private finishRequest(id: string, status: number, outcome: string, attempts: number) { this.db.prepare("UPDATE gateway_requests SET status=?,outcome=?,attempt_count=?,completed_at=? WHERE id=?").run(status, outcome, attempts, new Date().toISOString(), id) }
+  private finishAttempt(id: string, status: number, decision: string, error: string | null, latencyMs?: number, errorMessage?: string | null, accountName?: string | null) {
+    this.db.prepare("UPDATE gateway_attempts SET status=?,decision=?,error_type=?,completed_at=?,latency_ms=?,error_message=?,account_name=? WHERE id=?")
+      .run(status, decision, error, new Date().toISOString(), latencyMs ?? null, truncateError(errorMessage), accountName ?? null, id)
+  }
+
+  private finalizeRequest(id: string, input: RequestFinalizeInput): void {
+    const usage = input.usage ?? {}
+    this.db.prepare(`UPDATE gateway_requests SET status=?,outcome=?,attempt_count=?,completed_at=?,ok=?,latency_ms=?,local_prep_ms=?,first_token_ms=?,error=?,account_id=?,account_name=?,response_size_bytes=?,prompt_tokens=?,completion_tokens=?,total_tokens=?,cached_tokens=?,reasoning_tokens=?,text_tokens=?,image_tokens=?,audio_tokens=? WHERE id=?`)
+      .run(
+        input.status, input.outcome, input.attempts, new Date().toISOString(),
+        input.ok ?? 0, input.latencyMs ?? null, input.localPrepMs ?? null, input.firstTokenMs ?? null, truncateError(input.error),
+        input.accountId ?? null, input.accountName ?? null, input.responseSizeBytes ?? null,
+        usage.promptTokens ?? null, usage.completionTokens ?? null, usage.totalTokens ?? null, usage.cachedTokens ?? null, usage.reasoningTokens ?? null, usage.textTokens ?? null, usage.imageTokens ?? null, usage.audioTokens ?? null,
+        id,
+      )
+    const settings = input.logSettings
+    if (settings && settings.loggingEnabled) {
+      const wantBodies = settings.logBodies || (input.ok !== 1 && settings.logBodiesOnError)
+      if (wantBodies) this.writeBodies(id, settings.maxBodyCaptureBytes, input.requestBodyJson, input.responseBody, input.responseTruncated, input.meta)
+    }
+  }
+
+  private writeBodies(id: string, maxBytes: number, requestBodyJson: unknown, responseBody: unknown, responseTruncated: boolean | undefined, meta: { headers: Record<string, string> } | undefined): void {
+    const reqCloned = requestBodyJson !== undefined ? safeCloneBody(requestBodyJson, maxBytes) : { value: undefined as unknown, truncated: false }
+    const resCloned = responseBody !== undefined ? safeCloneBody(responseBody, maxBytes) : { value: undefined as unknown, truncated: false }
+    this.db.prepare("INSERT OR REPLACE INTO request_bodies(request_id,request_body_json,response_body_json,request_headers_json,request_truncated,response_truncated,has_request,has_response,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
+      .run(
+        id,
+        reqCloned.value === undefined ? null : JSON.stringify(reqCloned.value),
+        resCloned.value === undefined ? null : JSON.stringify(resCloned.value),
+        meta ? JSON.stringify(meta.headers) : null,
+        reqCloned.truncated ? 1 : 0,
+        responseTruncated || resCloned.truncated ? 1 : 0,
+        reqCloned.value !== undefined ? 1 : 0,
+        resCloned.value !== undefined ? 1 : 0,
+        new Date().toISOString(),
+      )
+  }
 }

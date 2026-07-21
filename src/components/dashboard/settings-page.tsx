@@ -9,6 +9,7 @@ import {
   RotateCcw,
   Save,
   ShieldCheck,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -17,6 +18,7 @@ import { Label } from "@/components/ui/label";
 import { useSession } from "./admin-context";
 import { ErrorState, PageIntro, Panel } from "./page-kit";
 import { useAdminResource } from "./use-admin-resource";
+import type { LogsCleanupResponse } from "./types";
 
 interface Settings {
   upstreamBaseUrl: string;
@@ -25,6 +27,11 @@ interface Settings {
   maintenanceIntervalMs: number;
   refreshBatchLimit: number;
   refreshConcurrency: number;
+  loggingEnabled: boolean;
+  logBodies: boolean;
+  logBodiesOnError: boolean;
+  logRetentionDays: number;
+  maxBodyCaptureBytes: number;
 }
 interface SettingsPayload {
   settings?: Settings;
@@ -43,6 +50,8 @@ export function SettingsPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [oneTimeCronSecret, setOneTimeCronSecret] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [cleanupBusy, setCleanupBusy] = useState(false);
+  const [stripDialogOpen, setStripDialogOpen] = useState(false);
   const form = draft ?? resource.data?.settings ?? null;
   if (!isAdmin)
     return (
@@ -99,6 +108,28 @@ export function SettingsPage() {
       ...(current ?? resource.data!.settings!),
       [key]: value,
     }));
+  async function cleanupLogs(options: { retentionDays?: number; stripBodies?: boolean }) {
+    setCleanupBusy(true);
+    setMessage(null);
+    try {
+      const response = await sessionFetch("/api/admin/logs/cleanup", {
+        method: "POST",
+        body: JSON.stringify(options),
+      });
+      const payload = await response.json().catch(() => null) as LogsCleanupResponse | { error?: { message?: string } } | null;
+      if (!response.ok) throw new Error((payload as { error?: { message?: string } })?.error?.message || "清理失败");
+      const result = payload as LogsCleanupResponse;
+      const parts: string[] = [];
+      if (result.deletedRequests != null) parts.push(`删除 ${result.deletedRequests} 条请求`);
+      if (result.deletedBodies != null) parts.push(`删除 ${result.deletedBodies} 条 body`);
+      if (result.stripped != null) parts.push(`剥离 ${result.stripped} 条 body`);
+      setMessage(parts.length ? parts.join("，") : "没有需要清理的数据");
+    } catch (cause) {
+      setMessage(cause instanceof Error ? cause.message : "清理失败");
+    } finally {
+      setCleanupBusy(false);
+    }
+  }
   return (
     <>
       <PageIntro
@@ -239,6 +270,73 @@ export function SettingsPage() {
               />
             </div>
           </Panel>
+          <Panel
+            title="请求日志"
+            description="默认只记元数据，调试时才开 body。"
+          >
+            <div className="grid gap-5 p-4 sm:p-5 lg:grid-cols-2">
+              <Toggle
+                checked={form.loggingEnabled}
+                onChange={(value) => update("loggingEnabled", value)}
+                label="启用日志"
+                description="关闭后不再记录新请求的元数据和 body。"
+              />
+              <Toggle
+                checked={form.logBodies}
+                onChange={(value) => update("logBodies", value)}
+                label="记录请求/响应体"
+                description="数据量大，仅调试开启。"
+                danger
+              />
+              <Toggle
+                checked={form.logBodiesOnError}
+                onChange={(value) => update("logBodiesOnError", value)}
+                label="失败时记录响应体"
+                description="默认开启，便于排查错误。"
+              />
+              <Field label="保留天数">
+                <Input
+                  type="number"
+                  min={1}
+                  max={365}
+                  value={form.logRetentionDays}
+                  onChange={(e) => update("logRetentionDays", Number(e.target.value))}
+                  required
+                />
+              </Field>
+              <Field label="body 截断字节">
+                <Input
+                  type="number"
+                  min={1024}
+                  value={form.maxBodyCaptureBytes}
+                  onChange={(e) => update("maxBodyCaptureBytes", Number(e.target.value))}
+                  required
+                />
+              </Field>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 border-t bg-[#fafafa] px-4 py-3 sm:px-5">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={cleanupBusy}
+                onClick={() => void cleanupLogs({ retentionDays: form.logRetentionDays })}
+              >
+                <Trash2 data-icon="inline-start" />
+                {cleanupBusy ? "正在清理" : "立即清理过期日志"}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={cleanupBusy}
+                onClick={() => setStripDialogOpen(true)}
+              >
+                <Trash2 data-icon="inline-start" />
+                剥离历史 body
+              </Button>
+            </div>
+          </Panel>
           <div className="sticky bottom-4 flex items-center justify-between rounded-lg border bg-white/95 p-3 shadow-lg backdrop-blur">
             <p className="text-xs text-muted-foreground" role="status">
               {message || "配置保存在持久数据目录和数据库中。"}
@@ -261,6 +359,27 @@ export function SettingsPage() {
             {copied ? <Check /> : <Copy />}{copied ? "已复制" : "复制密钥"}
           </Button>
           <DialogFooter><Button onClick={() => { setOneTimeCronSecret(null); setCopied(false); }}>我已安全保存</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={stripDialogOpen} onOpenChange={setStripDialogOpen}>
+        <DialogContent showCloseButton={false}>
+          <DialogHeader>
+            <DialogTitle>剥离历史 body</DialogTitle>
+            <DialogDescription>
+              该操作会清除所有历史请求记录的请求体和响应体，保留元数据。不可恢复，确认继续？
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setStripDialogOpen(false)}>取消</Button>
+            <Button
+              onClick={async () => {
+                setStripDialogOpen(false);
+                await cleanupLogs({ stripBodies: true });
+              }}
+            >
+              确认剥离
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </>

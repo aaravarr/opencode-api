@@ -1,39 +1,28 @@
 "use client";
 
+import { useMemo } from "react";
 import Link from "next/link";
 import { ArrowRight, CheckCircle2, Clock3, RefreshCw, ShieldAlert, UsersRound } from "lucide-react";
+import { Bar, CartesianGrid, ComposedChart, Line, XAxis, YAxis } from "recharts";
 import { Button } from "@/components/ui/button";
+import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { PageIntro, Panel, ErrorState, LoadingTable, EmptyState, formatDate } from "./page-kit";
 import { StatusBadge } from "./status-ui";
 import { useAdminResource } from "./use-admin-resource";
-import type { EventRecord, RequestRecord } from "./types";
+import type { OverviewPayload, UsageStats } from "./types";
 
-interface OverviewPayload {
-  counts?: {
-    totalAccounts?: number;
-    readyAccounts?: number;
-    quotaBlocked?: number;
-    inactiveAccounts?: number;
-  };
-  stats?: {
-    totalAccounts?: number;
-    availableAccounts?: number;
-    coolingAccounts?: number;
-    unavailableAccounts?: number;
-  };
-  routing?: {
-    currentAccountName?: string | null;
-    currentAccountId?: string | null;
-    preferredAccountName?: string | null;
-    preferredAccountId?: string | null;
-    nextRecoveryAt?: string | null;
-  };
-  recentRequests?: RequestRecord[];
-  recentEvents?: EventRecord[];
-}
+const trendPalette = ["#0070f3", "#00a0a0", "#0a7a3e", "#7928ca"];
+const trendConfig: ChartConfig = {
+  uncachedIn: { label: "输入", color: trendPalette[0] },
+  cached: { label: "缓存", color: trendPalette[1] },
+  outputNonReason: { label: "输出", color: trendPalette[2] },
+  reasoning: { label: "推理", color: trendPalette[3] },
+  requests: { label: "请求数", color: "#ab570a" },
+};
 
 export function OverviewPage() {
   const resource = useAdminResource<OverviewPayload>("/api/admin/overview");
+  const usageResource = useAdminResource<UsageStats>("/api/admin/usage?hours=24&granularity=auto");
   const data = resource.data;
 
   return (
@@ -58,6 +47,16 @@ export function OverviewPage() {
             <Metric icon={Clock3} label="额度冷却中" value={data?.counts?.quotaBlocked ?? data?.stats?.coolingAccounts} note="等待窗口恢复" />
             <Metric icon={ShieldAlert} label="不可用" value={data?.counts?.inactiveAccounts ?? data?.stats?.unavailableAccounts} note="订阅、认证或已停用" />
           </section>
+
+          <Panel title="24 小时 Token 趋势" description="堆叠柱图展示 Token 分段，折线展示请求数。">
+            {usageResource.loading ? <LoadingTable rows={3} columns={6} /> : usageResource.error ? (
+              <ErrorState message={usageResource.error} onRetry={() => void usageResource.refresh()} />
+            ) : usageResource.data?.byTime?.length ? (
+              <MiniTokenTrend data={usageResource.data} />
+            ) : (
+              <EmptyState title="暂无趋势数据" description="最近 24 小时没有请求记录。" />
+            )}
+          </Panel>
 
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(320px,.75fr)]">
             <Panel title="路由状态" description="自动回退始终开启，优先账号只影响第一候选。">
@@ -154,5 +153,47 @@ function QuickLink({ href, title, detail }: { href: string; title: string; detai
       </div>
       <ArrowRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-foreground" aria-hidden="true" />
     </Link>
+  );
+}
+
+function MiniTokenTrend({ data }: { data: UsageStats }) {
+  const chartData = useMemo(
+    () =>
+      data.byTime.map((bucket) => {
+        const prompt = bucket.promptTokens || 0;
+        const completion = bucket.completionTokens || 0;
+        const total = bucket.totalTokens || 0;
+        const cached = bucket.cachedTokens || 0;
+        const reasoning = bucket.reasoningTokens || 0;
+        const uncachedIn = Math.max(0, prompt - cached);
+        const reasoningOutside =
+          Math.abs(total - (prompt + completion + reasoning)) < Math.abs(total - (prompt + completion)) && reasoning > 0;
+        const outputNonReason = reasoningOutside ? completion : Math.max(0, completion - reasoning);
+        return {
+          label: bucket.label,
+          uncachedIn,
+          cached,
+          outputNonReason,
+          reasoning,
+          requests: bucket.requests,
+        };
+      }),
+    [data.byTime]
+  );
+  return (
+    <ChartContainer config={trendConfig} className="aspect-auto h-48 w-full p-3">
+      <ComposedChart data={chartData} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
+        <CartesianGrid vertical={false} strokeDasharray="3 3" stroke="#eee" />
+        <XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={6} minTickGap={32} fontSize={10} />
+        <YAxis yAxisId="tokens" tickLine={false} axisLine={false} tickMargin={4} width={40} fontSize={10} />
+        <YAxis yAxisId="requests" orientation="right" tickLine={false} axisLine={false} tickMargin={4} width={32} fontSize={10} />
+        <ChartTooltip content={<ChartTooltipContent indicator="dot" />} />
+        <Bar yAxisId="tokens" dataKey="uncachedIn" stackId="tokens" fill={trendPalette[0]} />
+        <Bar yAxisId="tokens" dataKey="cached" stackId="tokens" fill={trendPalette[1]} />
+        <Bar yAxisId="tokens" dataKey="outputNonReason" stackId="tokens" fill={trendPalette[2]} />
+        <Bar yAxisId="tokens" dataKey="reasoning" stackId="tokens" fill={trendPalette[3]} />
+        <Line yAxisId="requests" type="monotone" dataKey="requests" stroke="#ab570a" strokeWidth={1.5} dot={false} />
+      </ComposedChart>
+    </ChartContainer>
   );
 }

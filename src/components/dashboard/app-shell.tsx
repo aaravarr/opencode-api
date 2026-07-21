@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Activity,
+  BarChart3,
   CalendarClock,
   CircleGauge,
   KeyRound,
@@ -28,6 +29,7 @@ import { useSession } from "./admin-context";
 
 const navItems = [
   { href: "/overview", label: "总览", description: "账号池健康与恢复", icon: CircleGauge },
+  { href: "/usage", label: "用量看板", description: "Token 与请求趋势", icon: BarChart3 },
   { href: "/accounts", label: "账号池", description: "订阅、额度与令牌", icon: UsersRound },
   { href: "/routing", label: "智能路由", description: "优先账号与候选顺序", icon: Network },
   { href: "/api-keys", label: "API 密钥", description: "对外访问凭据", icon: KeyRound },
