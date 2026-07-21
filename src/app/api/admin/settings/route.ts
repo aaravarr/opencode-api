@@ -1,0 +1,8 @@
+import { z } from "zod";
+import { getPublicSecretStatus, getSystemSettings, updateSystemSettings } from "@/server/settings";
+import { requireAdministrator } from "../_auth";
+export const runtime = "nodejs";
+const schema = z.object({ upstreamBaseUrl: z.url(), upstreamRequestTimeoutMs: z.number().int().min(1000).max(600000), maintenanceEnabled: z.boolean(), maintenanceIntervalMs: z.number().int().min(10000).max(86400000), refreshBatchLimit: z.number().int().min(1).max(500), refreshConcurrency: z.number().int().min(1).max(32) });
+function secretStatus() { const value = getPublicSecretStatus(); return { masterKeyReady: true, apiKeyPepperReady: value.apiKeyPepper.configured, cronSecretReady: value.cronSecret.configured }; }
+export function GET(request: Request) { const user = requireAdministrator(request); if (user instanceof Response) return user; return Response.json({ settings: getSystemSettings(), secrets: secretStatus() }); }
+export async function PATCH(request: Request) { const user = requireAdministrator(request); if (user instanceof Response) return user; const input = schema.safeParse(await request.json().catch(() => null)); if (!input.success) return Response.json({ error: { type: "validation_error", message: "请检查配置值", details: input.error.flatten() } }, { status: 400 }); try { return Response.json({ settings: updateSystemSettings(input.data, user.id), secrets: secretStatus() }); } catch (cause) { return Response.json({ error: { type: "validation_error", message: cause instanceof Error ? cause.message : "配置地址不安全" } }, { status: 400 }); } }

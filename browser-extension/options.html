@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenCode Go Connector 设置</title>
+    <link rel="stylesheet" href="ui.css" />
+  </head>
+  <body class="options-body">
+    <main class="options-shell">
+      <p class="eyebrow">OpenCode Go Connector</p>
+      <h1>连接设置</h1>
+      <p class="options-lead">配置账号接收服务。API Key 只保存在当前浏览器的扩展本地存储中。</p>
+      <form id="options-form" class="options-card form-stack">
+        <label>后端地址<input id="backend-url" type="url" required placeholder="http://127.0.0.1:3000" /></label>
+        <label>API Key<input id="api-key" type="password" autocomplete="off" placeholder="粘贴你的统一入口 API Key" /></label>
+        <div class="actions"><button class="button primary" type="submit">保存设置</button><button id="clear" class="button secondary" type="button">清除配置</button></div>
+        <p id="options-status" class="form-message" aria-live="polite"></p>
+      </form>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

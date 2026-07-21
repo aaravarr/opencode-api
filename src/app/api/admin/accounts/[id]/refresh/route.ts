@@ -1,0 +1,44 @@
+import { getDatabase } from "@/server/db"
+import { OpenCodeWebError } from "@/server/opencode-web/client"
+import { getOpenCodeWebService } from "@/server/opencode-web/service"
+import { AccountRepository } from "@/server/repository"
+import { requireSession } from "../../../_auth"
+
+export const runtime = "nodejs"
+
+export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
+  const user = requireSession(request)
+  if (user instanceof Response) return user
+  const { id } = await context.params
+  const db = getDatabase()
+  if (!new AccountRepository(user.id, db).get(id)) {
+    return Response.json({ error: { type: "not_found", message: "账号不存在" } }, { status: 404 })
+  }
+
+  try {
+    const account = await getOpenCodeWebService(user.id).refreshUsage(id)
+    const quotaWindows = db.prepare(`SELECT kind,usage_percent,reset_at,source,last_observed_at
+      FROM quota_windows WHERE owner_user_id=? AND account_id=? ORDER BY last_observed_at DESC`)
+      .all(user.id, id) as Record<string, unknown>[]
+    return Response.json({
+      account: account ? {
+        ...account,
+        quotaWindows: quotaWindows.map((window) => ({
+          kind: window.kind,
+          usagePercent: window.usage_percent,
+          resetAt: window.reset_at,
+          source: window.source,
+          lastObservedAt: window.last_observed_at,
+        })),
+      } : null,
+    })
+  } catch (cause) {
+    const authenticationFailed = cause instanceof OpenCodeWebError && cause.code === "AUTH"
+    return Response.json({
+      error: {
+        type: authenticationFailed ? "opencode_auth_invalid" : "account_sync_failed",
+        message: cause instanceof Error ? cause.message : "账号同步失败",
+      },
+    }, { status: authenticationFailed ? 422 : 502 })
+  }
+}

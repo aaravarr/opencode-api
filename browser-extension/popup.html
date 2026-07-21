@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenCode Go Connector</title>
+    <link rel="stylesheet" href="ui.css" />
+  </head>
+  <body class="popup-body">
+    <main class="popup-shell">
+      <header class="brand-row">
+        <div class="mark" aria-hidden="true">OC</div>
+        <div>
+          <h1>OpenCode Go</h1>
+          <p>Account connector</p>
+        </div>
+        <span id="phase-dot" class="phase-dot"></span>
+      </header>
+
+      <section class="status-panel" aria-live="polite">
+        <p class="eyebrow">连接状态</p>
+        <p id="status-message" class="status-message">正在读取配置…</p>
+        <dl id="connection-detail" class="connection-detail" hidden>
+          <div><dt>Workspace</dt><dd id="workspace-id">—</dd></div>
+          <div><dt>Account</dt><dd id="account-name">—</dd></div>
+        </dl>
+      </section>
+
+      <section class="section-block">
+        <div class="section-heading"><span>01</span><h2>后端配置</h2></div>
+        <form id="config-form" class="form-stack">
+          <label>后端地址<input id="backend-url" type="url" required placeholder="http://127.0.0.1:3000" /></label>
+          <label>API Key<input id="api-key" type="password" autocomplete="off" placeholder="粘贴你的统一入口 API Key" /></label>
+          <button class="button secondary" type="submit">保存配置</button>
+        </form>
+      </section>
+
+      <section class="section-block">
+        <div class="section-heading"><span>02</span><h2>登录 OpenCode</h2></div>
+        <p class="body-copy">插件会打开 OpenCode 授权流程并自动选择 Google。确认授权后，账号会自动同步到后端。</p>
+        <button id="google-login" class="button primary" type="button">
+          <span class="google-g" aria-hidden="true">G</span>使用 Google 登录
+        </button>
+        <button id="sync-now" class="text-button" type="button">已登录？立即重新同步</button>
+      </section>
+
+      <footer>
+        <button id="open-options" class="text-button" type="button">打开完整设置</button>
+        <span>v<span id="extension-version"></span></span>
+      </footer>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
