@@ -1,8 +1,10 @@
 import { z } from "zod"
-import { authenticateApiKey } from "@/server/repository"
+import { randomUUID } from "node:crypto"
+import { authenticateApiKey, type ApiKeyRecord } from "@/server/repository"
 import { AccountOwnershipConflictError } from "@/server/repository"
 import { OpenCodeWebError } from "@/server/opencode-web/client"
 import { getOpenCodeWebService, type ReportBrowserAccountInput } from "@/server/opencode-web/service"
+import { getDatabase } from "@/server/db"
 
 export const runtime = "nodejs"
 const schema = z.object({
@@ -13,9 +15,19 @@ const schema = z.object({
 })
 const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization,x-api-key,content-type", "Access-Control-Allow-Methods": "POST,OPTIONS" }
 
+function recordEvent(ownerUserId: string, type: string, severity: "INFO" | "WARN" | "ERROR", accountId: string | null, metadata: Record<string, unknown>): void {
+  try {
+    const db = getDatabase()
+    db.prepare("INSERT INTO events(id,owner_user_id,type,severity,account_id,request_id,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?)")
+      .run(randomUUID(), ownerUserId, type, severity, accountId, null, JSON.stringify(metadata), new Date().toISOString())
+  } catch {
+    // 事件写入失败不应阻断账号录入主流程
+  }
+}
+
 interface PluginAccountDependencies {
-  authenticate(key: string): { ownerUserId: string } | null
-  report(ownerUserId: string, input: ReportBrowserAccountInput): Promise<unknown>
+  authenticate(key: string): (ApiKeyRecord & { hash: string }) | null
+  report(ownerUserId: string, input: ReportBrowserAccountInput): Promise<{ id: string; name: string; email: string | null; workspaceId: string }>
 }
 
 export function createPluginAccountPost(dependencies: PluginAccountDependencies) {
@@ -28,11 +40,34 @@ export function createPluginAccountPost(dependencies: PluginAccountDependencies)
     if (!input.success) return Response.json({ error: { type: "validation_error", details: input.error.flatten() } }, { status: 400, headers: cors })
     try {
       const account = await dependencies.report(apiKey.ownerUserId, input.data)
+      recordEvent(apiKey.ownerUserId, "ACCOUNT_CONNECTED", "INFO", account.id, {
+        apiKeyId: apiKey.id,
+        apiKeyName: apiKey.name,
+        apiKeyPrefix: apiKey.prefix,
+        workspaceId: input.data.workspaceId,
+        accountName: account.name,
+        accountEmail: account.email,
+        extensionVersion: input.data.extensionVersion ?? null,
+      })
       return Response.json({ account, message: "账号已连接，OpenCode Go Key 与额度已同步。" }, { status: 201, headers: cors })
     } catch (cause) {
-      if (cause instanceof AccountOwnershipConflictError) return Response.json({ error: { type: "workspace_conflict", message: cause.message } }, { status: 409, headers: cors })
-      if (cause instanceof OpenCodeWebError && cause.code === "AUTH") return Response.json({ error: { type: "opencode_auth_invalid", message: cause.message } }, { status: 422, headers: cors })
-      return Response.json({ error: { type: "account_sync_failed", message: cause instanceof Error ? cause.message : "Account sync failed" } }, { status: 502, headers: cors })
+      const errorType = cause instanceof AccountOwnershipConflictError ? "workspace_conflict"
+        : cause instanceof OpenCodeWebError && cause.code === "AUTH" ? "opencode_auth_invalid"
+        : "account_sync_failed"
+      const status = cause instanceof AccountOwnershipConflictError ? 409
+        : cause instanceof OpenCodeWebError && cause.code === "AUTH" ? 422
+        : 502
+      const message = cause instanceof Error ? cause.message : "Account sync failed"
+      recordEvent(apiKey.ownerUserId, "ACCOUNT_CONNECT_FAILED", "ERROR", null, {
+        apiKeyId: apiKey.id,
+        apiKeyName: apiKey.name,
+        apiKeyPrefix: apiKey.prefix,
+        workspaceId: input.data.workspaceId,
+        errorType,
+        message,
+        extensionVersion: input.data.extensionVersion ?? null,
+      })
+      return Response.json({ error: { type: errorType, message } }, { status, headers: cors })
     }
   }
 }
@@ -40,5 +75,5 @@ export function createPluginAccountPost(dependencies: PluginAccountDependencies)
 export function OPTIONS() { return new Response(null, { status: 204, headers: cors }) }
 export const POST = createPluginAccountPost({
   authenticate: (key) => authenticateApiKey(key),
-  report: (ownerUserId, input) => getOpenCodeWebService(ownerUserId).report(input),
+  report: (ownerUserId, input) => getOpenCodeWebService(ownerUserId).report(input) as Promise<{ id: string; name: string; email: string | null; workspaceId: string }>,
 })

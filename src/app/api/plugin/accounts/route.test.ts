@@ -13,7 +13,7 @@ describe("plugin account report API", () => {
 
   it("从 API key 所属关系确定 owner，客户端不能在 payload 指定其他用户", async () => {
     const report = vi.fn().mockResolvedValue({ id: "account-1", ownerUserId: "owner-from-key", credentialSource: "BROWSER_EXTENSION" })
-    const post = createPluginAccountPost({ authenticate: (key) => key === "ocg_valid" ? { ownerUserId: "owner-from-key" } : null, report })
+    const post = createPluginAccountPost({ authenticate: (key) => key === "ocg_valid" ? { id: "key-1", ownerUserId: "owner-from-key", name: "test-key", prefix: "ocg_xxx", enabled: true, allowedModels: null, expiresAt: null, lastUsedAt: null, createdAt: "now", revealable: false, hash: "hash" } : null, report })
     const response = await post(new Request("http://localhost/api/plugin/accounts", { method: "POST", headers: { authorization: "Bearer ocg_valid", "content-type": "application/json" }, body: JSON.stringify({ ...body, ownerUserId: "attacker-selected" }) }))
     expect(response.status).toBe(201)
     expect(report).toHaveBeenCalledWith("owner-from-key", body)

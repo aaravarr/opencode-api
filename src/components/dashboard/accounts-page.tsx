@@ -12,6 +12,7 @@ import {
   RefreshCw,
   Search,
   Star,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -105,6 +106,25 @@ export function AccountsPage() {
       await resource.refresh();
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "账号同步失败");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function deleteAccount(account: Account) {
+    if (!window.confirm(`确认删除 ${account.name || account.email || account.id}？该账号的连接信息将被清除，此操作不可恢复。`)) return;
+    setBusyId(account.id);
+    setActionError(null);
+    try {
+      const response = await adminFetch(`/api/admin/accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
+      if (!response.ok && response.status !== 204) {
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.error?.message || payload?.message || "账号删除失败");
+      }
+      if (selected?.id === account.id) setSelected(null);
+      await resource.refresh();
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "账号删除失败");
     } finally {
       setBusyId(null);
     }
@@ -205,6 +225,10 @@ export function AccountsPage() {
                         <DropdownMenuItem onSelect={() => void patchAccount(account, { adminState: account.adminState === "DISABLED" ? "ENABLED" : "DISABLED" })}>
                           <CircleOff />{account.adminState === "DISABLED" ? "启用账号" : "停用账号"}
                         </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem className="text-destructive" onSelect={() => void deleteAccount(account)}>
+                          <Trash2 />删除账号
+                        </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </TableCell>
@@ -222,6 +246,7 @@ export function AccountsPage() {
         onPreferred={setPreferred}
         onToggle={(account) => patchAccount(account, { adminState: account.adminState === "DISABLED" ? "ENABLED" : "DISABLED" })}
         onRefresh={refreshAccount}
+        onDelete={deleteAccount}
         busy={Boolean(selected && busyId === selected.id)}
       />
     </>
@@ -269,12 +294,13 @@ function ConnectorStep({ index, icon: Icon, title, description, children }: { in
   );
 }
 
-function AccountDetailSheet({ account, onOpenChange, onPreferred, onToggle, onRefresh, busy }: {
+function AccountDetailSheet({ account, onOpenChange, onPreferred, onToggle, onRefresh, onDelete, busy }: {
   account: Account | null;
   onOpenChange: (open: boolean) => void;
   onPreferred: (account: Account) => Promise<void>;
   onToggle: (account: Account) => Promise<void>;
   onRefresh: (account: Account) => Promise<void>;
+  onDelete: (account: Account) => Promise<void>;
   busy: boolean;
 }) {
   return (
@@ -324,6 +350,7 @@ function AccountDetailSheet({ account, onOpenChange, onPreferred, onToggle, onRe
               <Button variant="outline" onClick={() => void onRefresh(account)} disabled={busy}><RefreshCw className={busy ? "animate-spin" : undefined} data-icon="inline-start" />{busy ? "同步中" : "立即同步"}</Button>
               <Button variant="outline" onClick={() => void onToggle(account)} disabled={busy}>{account.adminState === "DISABLED" ? "启用账号" : "停用账号"}</Button>
               <Button onClick={() => void onPreferred(account)} disabled={busy}><Star data-icon="inline-start" />设为优先</Button>
+              <Button variant="outline" className="text-destructive" onClick={() => void onDelete(account)} disabled={busy}><Trash2 data-icon="inline-start" />删除账号</Button>
             </DialogFooter>
           </>
         ) : null}

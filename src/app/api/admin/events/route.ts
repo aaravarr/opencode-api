@@ -28,12 +28,17 @@
  function humanize(type: string, metadata: Record<string, unknown>): { message: string; detail: string | null } {
    const message = MESSAGE_BY_TYPE[type] ?? type.replace(/_/g, " ").toLowerCase();
    const parts: string[] = [];
+   if (metadata.apiKeyName) parts.push(`密钥 ${String(metadata.apiKeyName)}`);
+   if (metadata.accountEmail) parts.push(`邮箱 ${String(metadata.accountEmail)}`);
+   if (metadata.accountName) parts.push(`账号 ${String(metadata.accountName)}`);
+   if (metadata.workspaceId) parts.push(`workspace ${String(metadata.workspaceId)}`);
    if (metadata.kind) parts.push(`窗口 ${String(metadata.kind)}`);
    if (metadata.resetAt) parts.push(`预计恢复 ${String(metadata.resetAt)}`);
    if (metadata.retryAfterSeconds != null) parts.push(`${metadata.retryAfterSeconds} 秒后重试`);
    if (metadata.preferredAccountId) parts.push(`优先账号 ${String(metadata.preferredAccountId)}`);
    if (metadata.reason) parts.push(String(metadata.reason));
    if (metadata.error) parts.push(String(metadata.error));
+   if (metadata.message) parts.push(String(metadata.message));
    return { message, detail: parts.length ? parts.join(" · ") : null };
  }
  
