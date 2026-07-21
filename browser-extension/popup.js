@@ -26,6 +26,7 @@ function render(model) {
   $("account-name").textContent = runtime.accountName ?? "—";
   $("connection-detail").hidden = !runtime.workspaceId;
   $("google-login").disabled = !config.apiKeyConfigured;
+  $("github-login").disabled = !config.apiKeyConfigured;
 }
 
 async function refresh() {
@@ -101,6 +102,10 @@ form.addEventListener("submit", async (event) => {
 
 $("google-login").addEventListener("click", async () => {
   try { render(await send("START_GOOGLE_LOGIN")); window.close(); }
+  catch (error) { status.textContent = error.message; }
+});
+$("github-login").addEventListener("click", async () => {
+  try { render(await send("START_GITHUB_LOGIN")); window.close(); }
   catch (error) { status.textContent = error.message; }
 });
 $("sync-now").addEventListener("click", async () => {

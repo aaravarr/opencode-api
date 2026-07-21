@@ -14,7 +14,8 @@ import {
   workspaceIdFromUrl,
 } from "./lib/state.js";
 
-const OPENCODE_AUTHORIZE_URL = "https://opencode.ai/auth/authorize?continue=/auth&ocg_flow=1";
+const OPENCODE_GOOGLE_AUTHORIZE_URL = "https://auth.opencode.ai/google/authorize";
+const OPENCODE_GITHUB_AUTHORIZE_URL = "https://auth.opencode.ai/github/authorize";
 const LOGIN_WINDOW = Object.freeze({ width: 520, height: 720 });
 let submissionInFlight = null;
 
@@ -77,7 +78,7 @@ async function findWorkspaceTab() {
 async function detectCompletedLogin() {
   const runtime = await loadRuntime();
   // 非流程中不主动检测/弹窗，避免用户正常浏览 opencode.ai 时被打扰
-  if (!runtime.flowActive) return updateRuntime({ phase: PHASE.IDLE, message: "准备就绪。点「使用 Google 登录」开始录入账号。" });
+  if (!runtime.flowActive) return updateRuntime({ phase: PHASE.IDLE, message: "准备就绪。点「使用 Google 登录」或「使用 GitHub 登录」开始录入账号。" });
   await updateRuntime({
     phase: PHASE.DETECTING,
     message: "正在检查 OpenCode 登录状态…",
@@ -97,7 +98,7 @@ async function detectCompletedLogin() {
   });
 }
 
-async function startGoogleLogin() {
+async function startLogin(provider = "google") {
   const config = await loadConfig();
   if (!configReady(config)) {
     return updateRuntime({
@@ -105,6 +106,8 @@ async function startGoogleLogin() {
       message: "请先完成后端配置。",
     });
   }
+  const loginUrl = provider === "github" ? OPENCODE_GITHUB_AUTHORIZE_URL : OPENCODE_GOOGLE_AUTHORIZE_URL;
+  const label = provider === "github" ? "GitHub" : "Google";
   const current = await chrome.windows.getCurrent();
   const left = Number.isFinite(current.left) && Number.isFinite(current.width)
     ? Math.round(current.left + (current.width - LOGIN_WINDOW.width) / 2)
@@ -113,7 +116,7 @@ async function startGoogleLogin() {
     ? Math.round(current.top + (current.height - LOGIN_WINDOW.height) / 2)
     : undefined;
   const loginWindow = await chrome.windows.create({
-    url: OPENCODE_AUTHORIZE_URL,
+    url: loginUrl,
     type: "popup",
     focused: true,
     width: LOGIN_WINDOW.width,
@@ -124,7 +127,7 @@ async function startGoogleLogin() {
   const tab = loginWindow.tabs?.[0];
   return updateRuntime({
     phase: PHASE.AWAITING_LOGIN,
-    message: "固定登录窗口已打开，请使用 Google 完成登录。",
+    message: `固定登录窗口已打开，请使用 ${label} 完成登录。`,
     workspaceId: null,
     loginTabId: tab?.id ?? null,
     loginWindowId: loginWindow.id ?? null,
@@ -245,7 +248,7 @@ chrome.cookies.onChanged.addListener((change) => {
     if (change.removed) {
       await updateRuntime({
         phase: PHASE.AWAITING_LOGIN,
-        message: "OpenCode 会话已失效，请重新使用 Google 登录。",
+        message: "OpenCode 会话已失效，请重新登录。",
       });
       return;
     }
@@ -304,7 +307,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         await detectCompletedLogin().catch(() => undefined);
         return viewModel();
       case "START_GOOGLE_LOGIN":
-        await startGoogleLogin();
+        await startLogin("google");
+        return viewModel();
+      case "START_GITHUB_LOGIN":
+        await startLogin("github");
         return viewModel();
       case "DETECT_LOGIN":
         await detectCompletedLogin();
