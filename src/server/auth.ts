@@ -236,12 +236,21 @@ export function authenticateRequest(request: Request, db: AppDatabase = getDatab
   return new AuthService(db).authenticateSession(getSessionToken(request) ?? "")
 }
 
-export function buildSessionCookie(token: string, expiresAt: string, secure = process.env.NODE_ENV === "production"): string {
-  return `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Expires=${new Date(expiresAt).toUTCString()}${secure ? "; Secure" : ""}`
+function isSecureRequest(request?: Request): boolean {
+  if (!request) return process.env.NODE_ENV === "production"
+  const forwardedProto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase()
+  if (forwardedProto) return forwardedProto === "https"
+  return new URL(request.url).protocol === "https:"
 }
 
-export function clearSessionCookie(secure = process.env.NODE_ENV === "production"): string {
-  return `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure ? "; Secure" : ""}`
+export function buildSessionCookie(token: string, expiresAt: string, secure = process.env.NODE_ENV === "production", request?: Request): string {
+  const useSecure = request ? isSecureRequest(request) : secure
+  return `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Expires=${new Date(expiresAt).toUTCString()}${useSecure ? "; Secure" : ""}`
+}
+
+export function clearSessionCookie(secure = process.env.NODE_ENV === "production", request?: Request): string {
+  const useSecure = request ? isSecureRequest(request) : secure
+  return `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${useSecure ? "; Secure" : ""}`
 }
 
 export function assertSameOrigin(request: Request): void {
