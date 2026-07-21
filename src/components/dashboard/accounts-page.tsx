@@ -5,6 +5,7 @@ import {
   ChevronRight,
   CircleOff,
   Download,
+  Eye,
   KeyRound,
   MoreHorizontal,
   Plus,
@@ -219,7 +220,7 @@ export function AccountsPage() {
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
-                        <DropdownMenuItem onSelect={() => setSelected(account)}>查看详情</DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => setSelected(account)}><Eye />查看详情</DropdownMenuItem>
                         <DropdownMenuItem onSelect={() => void setPreferred(account)}><Star />设为优先账号</DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem onSelect={() => void patchAccount(account, { adminState: account.adminState === "DISABLED" ? "ENABLED" : "DISABLED" })}>
