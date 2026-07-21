@@ -66,8 +66,9 @@ export interface ApiKeyRecord {
   prefix?: string | null;
   keyPrefix?: string | null;
   status?: string | null;
-  enabled?: boolean;
-  createdAt?: string | null;
+ enabled?: boolean;
+ revealable?: boolean;
+ createdAt?: string | null;
   expiresAt?: string | null;
   lastUsedAt?: string | null;
   requestCount?: number | null;
@@ -100,8 +101,9 @@ export interface RequestRecord {
   attemptCount?: number | null;
   attempts?: RouteAttempt[] | null;
   latencyMs?: number | null;
-  firstTokenMs?: number | null;
-  promptTokens?: number | null;
+ firstTokenMs?: number | null;
+ tps?: number | null;
+ promptTokens?: number | null;
   inputTokens?: number | null;
   completionTokens?: number | null;
   outputTokens?: number | null;

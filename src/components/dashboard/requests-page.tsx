@@ -5,7 +5,7 @@ import { ChevronLeft, ChevronRight, LoaderCircle, RefreshCw, Search } from "luci
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EmptyState, ErrorState, LoadingTable, PageIntro, Panel, formatDate } from "./page-kit";
 import { StatusBadge } from "./status-ui";
@@ -97,7 +97,7 @@ export function RequestsPage() {
         ) : !items.length ? (
           <EmptyState title="暂无请求记录" description="没有匹配当前过滤条件的请求，尝试调整搜索或过滤。" />
         ) : (
-          <Table className="min-w-[1100px]">
+          <Table className="min-w-[1180px]">
             <TableHeader className="bg-[#fafafa]">
               <TableRow>
                 <TableHead className="px-4 text-xs text-muted-foreground">时间</TableHead>
@@ -107,8 +107,9 @@ export function RequestsPage() {
                 <TableHead className="text-xs text-muted-foreground">服务账号</TableHead>
                 <TableHead className="text-right text-xs text-muted-foreground">尝试</TableHead>
                 <TableHead className="text-right text-xs text-muted-foreground">延迟</TableHead>
-                <TableHead className="text-right text-xs text-muted-foreground">TTFT</TableHead>
-                <TableHead className="text-right text-xs text-muted-foreground">Tokens</TableHead>
+               <TableHead className="text-right text-xs text-muted-foreground">TTFT</TableHead>
+               <TableHead className="text-right text-xs text-muted-foreground">TPS</TableHead>
+               <TableHead className="text-right text-xs text-muted-foreground">Tokens</TableHead>
                 <TableHead className="text-xs text-muted-foreground">客户端</TableHead>
                 <TableHead className="w-14" />
               </TableRow>
@@ -125,8 +126,9 @@ export function RequestsPage() {
                   <TableCell className="font-mono text-xs">{request.accountName || "未分配"}</TableCell>
                   <TableCell className="tabular text-right font-mono text-xs">{request.attemptCount ?? 0}</TableCell>
                   <TableCell className="tabular text-right font-mono text-xs">{request.latencyMs != null ? `${request.latencyMs} ms` : "—"}</TableCell>
-                  <TableCell className="tabular text-right font-mono text-xs">{request.firstTokenMs != null ? `${request.firstTokenMs} ms` : "—"}</TableCell>
-                  <TableCell className="tabular text-right font-mono text-xs">
+                 <TableCell className="tabular text-right font-mono text-xs">{request.firstTokenMs != null ? `${request.firstTokenMs} ms` : "—"}</TableCell>
+                 <TableCell className="tabular text-right font-mono text-xs">{request.tps != null ? request.tps : "—"}</TableCell>
+                 <TableCell className="tabular text-right font-mono text-xs">
                     {request.totalTokens != null ? (
                       <span title={`输入 ${request.promptTokens ?? 0} / 输出 ${request.completionTokens ?? 0}`}>
                         {request.totalTokens}
@@ -193,15 +195,15 @@ function RequestDetailSheet({ request, onOpenChange }: { request: RequestRecord 
   }, [request?.id, fetchDetail]);
 
   return (
-    <Sheet open={Boolean(request)} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full gap-0 p-0 sm:max-w-2xl">
+    <Dialog open={Boolean(request)} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85dvh] gap-0 overflow-hidden p-0 sm:max-w-2xl">
         {request ? (
           <>
-            <SheetHeader className="border-b px-5 py-4">
-              <SheetTitle>请求详情</SheetTitle>
-              <SheetDescription className="font-mono text-[11px]">{request.id}</SheetDescription>
-            </SheetHeader>
-            <div className="flex-1 overflow-y-auto p-5">
+            <DialogHeader className="border-b px-5 py-4">
+              <DialogTitle>请求详情</DialogTitle>
+              <DialogDescription className="font-mono text-[11px]">{request.id}</DialogDescription>
+            </DialogHeader>
+            <div className="max-h-[calc(85dvh-64px)] overflow-y-auto p-5">
               {loading ? (
                 <div className="flex items-center gap-2 py-12 text-sm text-muted-foreground">
                   <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />正在加载详情
@@ -229,8 +231,8 @@ function RequestDetailSheet({ request, onOpenChange }: { request: RequestRecord 
             </div>
           </>
         ) : null}
-      </SheetContent>
-    </Sheet>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -245,8 +247,9 @@ function BasicInfo({ request }: { request: RequestDetail["request"] }) {
     ["创建时间", formatDate(request.createdAt)],
     ["总延迟", request.latencyMs != null ? `${request.latencyMs} ms` : "—"],
     ["本地准备", request.localPrepMs != null ? `${request.localPrepMs} ms` : "—"],
-    ["首 Token", request.firstTokenMs != null ? `${request.firstTokenMs} ms` : "—"],
-    ["请求大小", request.requestSizeBytes != null ? formatBytes(request.requestSizeBytes) : "—"],
+   ["首 Token", request.firstTokenMs != null ? `${request.firstTokenMs} ms` : "—"],
+   ["TPS", request.tps != null ? String(request.tps) : "—"],
+   ["请求大小", request.requestSizeBytes != null ? formatBytes(request.requestSizeBytes) : "—"],
     ["响应大小", request.responseSizeBytes != null ? formatBytes(request.responseSizeBytes) : "—"],
   ];
   return (

@@ -39,7 +39,18 @@ async function updateRuntime(patch) {
     updatedAt: new Date().toISOString(),
   };
   await chrome.storage.session.set({ [RUNTIME_STORAGE_KEY]: next });
+  void broadcastRuntime(publicRuntime(next));
   return next;
+}
+
+async function broadcastRuntime(runtime) {
+  try {
+    const tabs = await chrome.tabs.query({ url: "https://opencode.ai/*" });
+    for (const tab of tabs) {
+      if (tab.id == null) continue;
+      chrome.tabs.sendMessage(tab.id, { type: "RUNTIME_UPDATE", runtime }, () => void chrome.runtime.lastError);
+    }
+  } catch { /* no tabs */ }
 }
 
 async function viewModel() {

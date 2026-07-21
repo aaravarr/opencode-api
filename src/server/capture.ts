@@ -30,7 +30,16 @@ function readUsageObject(usage: Record<string, unknown>): TokenUsage | undefined
   const promptTokens = num(usage.prompt_tokens) ?? num(usage.input_tokens);
   const completionTokens = num(usage.completion_tokens) ?? num(usage.output_tokens);
   const totalTokens = num(usage.total_tokens);
-  const cachedTokens = num(usage.cached_tokens) ?? num(usage.cache_read_input_tokens);
+  // 缓存命中 token 在不同上游协议里位置不同：
+  //   Anthropic Messages: 根对象 cache_read_input_tokens
+  //   OpenAI Chat Completions: 嵌套 prompt_tokens_details.cached_tokens
+  //   OpenAI Responses API: 嵌套 input_tokens_details.cached_tokens
+  // 只取根对象会漏掉 OpenAI 的两种，导致缓存数恒为 0。
+  const cachedTokens =
+    num(usage.cached_tokens)
+    ?? num(usage.cache_read_input_tokens)
+    ?? num((usage.prompt_tokens_details as Record<string, unknown> | undefined)?.cached_tokens)
+    ?? num((usage.input_tokens_details as Record<string, unknown> | undefined)?.cached_tokens);
   const reasoningTokens = num(usage.reasoning_tokens) ?? num((usage.completion_tokens_details as Record<string, unknown> | undefined)?.reasoning_tokens);
   const textTokens = num(usage.text_tokens) ?? num((usage.completion_tokens_details as Record<string, unknown> | undefined)?.text_tokens);
   const imageTokens = num(usage.image_tokens);

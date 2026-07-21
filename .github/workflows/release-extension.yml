@@ -1,0 +1,58 @@
+ name: Release Browser Extension
+ 
+ on:
+   release:
+     types: [published]
+   workflow_dispatch:
+     inputs:
+       tag:
+         description: "Release tag to attach the asset to (e.g. v0.2.0)"
+         required: true
+ 
+ permissions:
+   contents: write
+ 
+ jobs:
+   package:
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+ 
+       - name: Stage extension files
+         run: |
+           mkdir -p staging
+           rsync -a \
+             --exclude='package.json' \
+             --exclude='package-lock.json' \
+             --exclude='scripts/' \
+             --exclude='README.md' \
+             --exclude='node_modules/' \
+             browser-extension/ staging/
+ 
+       - name: Verify manifest
+         run: |
+           node -e "JSON.parse(require('fs').readFileSync('staging/manifest.json','utf8'))"
+           echo "manifest.json is valid"
+ 
+       - name: Zip extension
+         run: |
+           cd staging
+           zip -r ../opencode-go-connector.zip .
+           cd ..
+           unzip -l opencode-go-connector.zip
+ 
+       - name: Resolve tag
+         id: tag
+         run: |
+           if [ -n "${{ inputs.tag }}" ]; then
+             echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+           else
+             echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+           fi
+ 
+       - name: Upload asset to release
+         uses: softprops/action-gh-release@v2
+         with:
+           tag_name: ${{ steps.tag.outputs.tag }}
+           files: opencode-go-connector.zip
+           fail_on_unmatched_files: true

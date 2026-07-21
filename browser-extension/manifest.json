@@ -18,11 +18,16 @@
     "default_title": "OpenCode Go Connector"
   },
   "options_page": "options.html",
-  "content_scripts": [
-    {
-      "matches": ["https://auth.opencode.ai/*"],
-      "js": ["google-login.js"],
-      "run_at": "document_idle"
-    }
-  ]
+ "content_scripts": [
+   {
+     "matches": ["https://auth.opencode.ai/*"],
+     "js": ["google-login.js"],
+     "run_at": "document_idle"
+   },
+   {
+     "matches": ["https://opencode.ai/*"],
+     "js": ["page-overlay.js"],
+     "run_at": "document_idle"
+   }
+ ]
 }

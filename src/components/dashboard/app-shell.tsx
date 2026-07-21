@@ -18,12 +18,11 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-  SheetTrigger,
-} from "@/components/ui/sheet";
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useSession } from "./admin-context";
 
@@ -52,27 +51,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       <div className="min-w-0">
         <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b bg-white/90 px-4 backdrop-blur-md sm:px-6">
-          <Sheet>
-            <SheetTrigger asChild>
-              <Button variant="ghost" size="icon" className="-ml-1 lg:hidden" aria-label="打开导航">
-                <Menu aria-hidden="true" />
-              </Button>
-            </SheetTrigger>
-            <SheetContent side="left" className="w-[286px] gap-0 p-0 sm:max-w-[286px]">
-              <SheetHeader className="sr-only">
-                <SheetTitle>控制台导航</SheetTitle>
-              </SheetHeader>
-              <Sidebar pathname={pathname} mobile />
-            </SheetContent>
-          </Sheet>
+         <Dialog>
+           <DialogTrigger asChild>
+             <Button variant="ghost" size="icon" className="-ml-1 lg:hidden" aria-label="打开导航">
+               <Menu aria-hidden="true" />
+             </Button>
+           </DialogTrigger>
+           <DialogContent className="gap-0 p-0 sm:max-w-[300px]">
+             <DialogTitle className="sr-only">控制台导航</DialogTitle>
+             <Sidebar pathname={pathname} mobile />
+           </DialogContent>
+         </Dialog>
 
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-medium tracking-[-0.02em]">{active.label}</p>
             <p className="hidden truncate text-xs text-muted-foreground sm:block">{active.description}</p>
           </div>
 
-          <div className="flex items-center gap-2">
-            <div className="hidden items-center gap-2 rounded-md border bg-[#fafafa] px-2.5 py-1.5 text-xs text-muted-foreground sm:flex">
+           <div className="flex items-center gap-2">
+             <div className="hidden items-center gap-2 rounded-md border bg-[#fafafa] px-2.5 py-1.5 text-xs text-muted-foreground sm:flex">
               <Activity className="size-3.5 text-success" aria-hidden="true" />
               {user.displayName || user.username} · {isAdmin ? "管理员" : "普通用户"}
             </div>

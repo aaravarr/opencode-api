@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ChevronRight,
   CircleOff,
+  Download,
   KeyRound,
   MoreHorizontal,
   Plus,
@@ -15,7 +16,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -38,10 +39,18 @@ export function AccountsPage() {
   const [selected, setSelected] = useState<Account | null>(null);
   const [connectorOpen, setConnectorOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const accounts = resource.data?.accounts ?? [];
-  const term = query.trim().toLowerCase();
-  const filtered = term
+ const [actionError, setActionError] = useState<string | null>(null);
+ const accounts = resource.data?.accounts ?? [];
+ const term = query.trim().toLowerCase();
+ const [downloadInfo, setDownloadInfo] = useState<{ version: string | null; downloadUrl: string } | null>(null);
+ useEffect(() => {
+   let cancelled = false;
+   void fetch("/api/extension/latest").then((r) => r.json().catch(() => null)).then((data) => {
+     if (!cancelled && data?.downloadUrl) setDownloadInfo({ version: data.version ?? null, downloadUrl: data.downloadUrl });
+   }).catch(() => undefined);
+   return () => { cancelled = true };
+ }, []);
+ const filtered = term
     ? accounts.filter((account) => [account.name, account.email, account.workspaceId, account.id, account.authState]
       .some((value) => String(value || "").toLowerCase().includes(term)))
     : accounts;
@@ -108,14 +117,21 @@ export function AccountsPage() {
         title="OpenCode Go 账号池"
         description="浏览器插件负责 Google 登录和 Console 会话同步；模型请求只使用为每个 workspace 自动维护的 Go API Key。"
         actions={
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={() => void resource.refresh()} disabled={resource.loading}>
-              <RefreshCw data-icon="inline-start" />刷新缓存
-            </Button>
-            <Button size="sm" onClick={() => setConnectorOpen(true)}>
-              <Plus data-icon="inline-start" />连接账号
-            </Button>
-          </div>
+         <div className="flex gap-2">
+           <Button variant="outline" size="sm" onClick={() => void resource.refresh()} disabled={resource.loading}>
+             <RefreshCw data-icon="inline-start" />刷新缓存
+           </Button>
+           {downloadInfo ? (
+             <Button variant="outline" size="sm" asChild>
+               <a href={downloadInfo.downloadUrl} target="_blank" rel="noopener noreferrer" download>
+                 <Download data-icon="inline-start" />下载插件{downloadInfo.version ? ` v${downloadInfo.version}` : ""}
+               </a>
+             </Button>
+           ) : null}
+           <Button size="sm" onClick={() => setConnectorOpen(true)}>
+             <Plus data-icon="inline-start" />连接账号
+           </Button>
+         </div>
         }
       />
 
@@ -214,13 +230,13 @@ export function AccountsPage() {
 
 function ConnectorSheet({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full gap-0 p-0 sm:max-w-lg">
-        <SheetHeader className="border-b px-5 py-4">
-          <SheetTitle>通过浏览器插件连接账号</SheetTitle>
-          <SheetDescription>Google 登录发生在你的浏览器中，后端不会接触 Google 密码。</SheetDescription>
-        </SheetHeader>
-        <div className="flex-1 space-y-3 overflow-y-auto px-5 py-6">
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85dvh] gap-0 overflow-hidden p-0 sm:max-w-lg">
+        <DialogHeader className="border-b px-5 py-4">
+          <DialogTitle>通过浏览器插件连接账号</DialogTitle>
+          <DialogDescription>Google 登录发生在你的浏览器中，后端不会接触 Google 密码。</DialogDescription>
+        </DialogHeader>
+        <div className="max-h-[calc(85dvh-160px)] space-y-3 overflow-y-auto px-5 py-6">
           <ConnectorStep index="01" icon={Puzzle} title="加载插件" description="在 Chrome / Edge 扩展管理页开启开发者模式，加载项目中的 browser-extension 目录。" />
           <ConnectorStep index="02" icon={KeyRound} title="配置连接" description="填写本系统的访问地址，以及当前用户在“API 密钥”页面创建的统一入口 Key。" />
           <ConnectorStep index="03" icon={Star} title="使用 Google 登录" description="点击插件中的 Google 登录。完成 OpenCode 授权并进入 workspace 后，插件会自动上报并同步额度。" />
@@ -228,11 +244,11 @@ function ConnectorSheet({ open, onOpenChange }: { open: boolean; onOpenChange: (
             后端会查找名为 <code className="font-mono text-foreground">OpenCode to API</code> 的 Go Key；已存在则复用，否则自动创建。Cookie 和完整 Go Key 只会加密保存在后端。
           </div>
         </div>
-        <SheetFooter className="border-t bg-[#fafafa] px-5 py-4">
+        <DialogFooter className="border-t bg-[#fafafa] px-5 py-4 sm:justify-start">
           <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
-        </SheetFooter>
-      </SheetContent>
-    </Sheet>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -254,14 +270,14 @@ function AccountDetailSheet({ account, onOpenChange, onPreferred, onToggle, onRe
   busy: boolean;
 }) {
   return (
-    <Sheet open={Boolean(account)} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full gap-0 p-0 sm:max-w-2xl">
+    <Dialog open={Boolean(account)} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[88dvh] gap-0 overflow-hidden p-0 sm:max-w-2xl">
         {account ? (
           <>
-            <SheetHeader className="border-b px-5 py-4">
-              <div className="min-w-0 pr-8"><SheetTitle className="truncate" title={account.name || account.email || "未命名账号"}>{account.name || account.email || "未命名账号"}</SheetTitle><SheetDescription className="mt-1 truncate font-mono text-[11px]" title={account.workspaceId || account.id}>{account.workspaceId || account.id}</SheetDescription></div>
-            </SheetHeader>
-            <div className="scrollbar-thin flex-1 space-y-5 overflow-y-auto px-5 py-5">
+            <DialogHeader className="border-b px-5 py-4">
+              <div className="min-w-0 pr-8"><DialogTitle className="truncate" title={account.name || account.email || "未命名账号"}>{account.name || account.email || "未命名账号"}</DialogTitle><DialogDescription className="mt-1 truncate font-mono text-[11px]" title={account.workspaceId || account.id}>{account.workspaceId || account.id}</DialogDescription></div>
+            </DialogHeader>
+            <div className="scrollbar-thin max-h-[calc(88dvh-160px)] space-y-5 overflow-y-auto px-5 py-5">
               <div className="flex flex-wrap gap-2"><AccountBadges account={account} /><BillingSafetyBadge account={account} /></div>
               {account.billingGuard !== "VERIFIED_GO_ONLY" ? (
                 <div className="rounded-md border border-warning/25 bg-warning-soft px-3.5 py-3 text-xs leading-5 text-foreground">
@@ -296,15 +312,15 @@ function AccountDetailSheet({ account, onOpenChange, onPreferred, onToggle, onRe
                 </div>
               </DetailSection>
             </div>
-            <SheetFooter className="flex-row flex-wrap border-t bg-[#fafafa] px-5 py-4">
+            <DialogFooter className="flex-row flex-wrap border-t bg-[#fafafa] px-5 py-4 sm:justify-start">
               <Button variant="outline" onClick={() => void onRefresh(account)} disabled={busy}><RefreshCw className={busy ? "animate-spin" : undefined} data-icon="inline-start" />{busy ? "同步中" : "立即同步"}</Button>
               <Button variant="outline" onClick={() => void onToggle(account)} disabled={busy}>{account.adminState === "DISABLED" ? "启用账号" : "停用账号"}</Button>
               <Button onClick={() => void onPreferred(account)} disabled={busy}><Star data-icon="inline-start" />设为优先</Button>
-            </SheetFooter>
+            </DialogFooter>
           </>
         ) : null}
-      </SheetContent>
-    </Sheet>
+      </DialogContent>
+    </Dialog>
   );
 }
 

@@ -7,6 +7,7 @@ const scripts = [
   "google-login.js",
   "popup.js",
   "options.js",
+  "page-overlay.js",
   "lib/config.js",
   "lib/connector.js",
   "lib/state.js",

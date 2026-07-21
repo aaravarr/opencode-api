@@ -75,9 +75,13 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
   const body = db.prepare("SELECT request_body_json,response_body_json,request_headers_json,request_truncated,response_truncated,has_request,has_response FROM request_bodies WHERE request_id=?").get(id) as BodyRow | undefined;
   const attempts = db.prepare("SELECT id,account_id,account_name,attempt_number,status,decision,error_type,error_message,latency_ms,started_at,completed_at FROM gateway_attempts WHERE request_id=? ORDER BY attempt_number").all(id) as AttemptRow[];
   const headers = parseJson<Record<string, string>>(body?.request_headers_json ?? null);
+  const genLatency = row.latency_ms != null ? Math.max(0, row.latency_ms - (row.local_prep_ms ?? 0) - (row.first_token_ms ?? 0)) : null;
+  const tpsTokens = (row.completion_tokens ?? 0) + (row.reasoning_tokens ?? 0);
+  const tps = genLatency != null && genLatency >= 50 && tpsTokens > 0 ? Number((tpsTokens / (genLatency / 1000)).toFixed(1)) : null;
   return Response.json({
     request: {
       id: row.id,
+      tps,
       endpoint: row.endpoint,
       createdAt: row.started_at,
       model: row.model,

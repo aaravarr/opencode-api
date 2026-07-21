@@ -27,9 +27,21 @@ describe("capture.extractUsage", () => {
     expect(extractUsage({ usage: { input_tokens: 4, output_tokens: 6 } })).toMatchObject({ promptTokens: 4, completionTokens: 6, totalTokens: 10 })
   })
 
-  it("从 completion_tokens_details 读取 reasoning_tokens", () => {
-    expect(extractUsage({ usage: { prompt_tokens: 1, completion_tokens: 2, completion_tokens_details: { reasoning_tokens: 9 } } })).toMatchObject({ reasoningTokens: 9 })
-  })
+ it("从 completion_tokens_details 读取 reasoning_tokens", () => {
+   expect(extractUsage({ usage: { prompt_tokens: 1, completion_tokens: 2, completion_tokens_details: { reasoning_tokens: 9 } } })).toMatchObject({ reasoningTokens: 9 })
+ })
+ 
+ it("从 prompt_tokens_details 读取 OpenAI Chat Completions 缓存命中", () => {
+   expect(extractUsage({ usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150, prompt_tokens_details: { cached_tokens: 80 } } })).toMatchObject({ cachedTokens: 80 })
+ })
+ 
+ it("从 input_tokens_details 读取 Responses API 缓存命中", () => {
+   expect(extractUsage({ usage: { input_tokens: 100, output_tokens: 50, total_tokens: 150, input_tokens_details: { cached_tokens: 80 } } })).toMatchObject({ cachedTokens: 80 })
+ })
+ 
+ it("从根对象 cache_read_input_tokens 读取 Anthropic 缓存命中", () => {
+   expect(extractUsage({ usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 70 } })).toMatchObject({ cachedTokens: 70 })
+ })
 
   it("支持 message.usage 嵌套", () => {
     expect(extractUsage({ message: { usage: { prompt_tokens: 5, completion_tokens: 5 } } })).toMatchObject({ promptTokens: 5, completionTokens: 5, totalTokens: 10 })

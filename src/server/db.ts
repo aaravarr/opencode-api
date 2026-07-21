@@ -200,6 +200,7 @@ export function createDatabase(filename: string): AppDatabase {
   db.exec(schema)
   ensureCurrentAccountColumns(db)
   ensureCurrentGatewayRequestColumns(db)
+  ensureCurrentApiKeyColumns(db)
   return db
 }
 
@@ -214,6 +215,11 @@ function ensureCurrentAccountColumns(db: AppDatabase): void {
   for (const [name, definition] of additions) {
     if (!existing.has(name)) db.exec(`ALTER TABLE accounts ADD COLUMN ${name} ${definition}`)
   }
+}
+
+function ensureCurrentApiKeyColumns(db: AppDatabase): void {
+  const cols = new Set((db.prepare("PRAGMA table_info(api_keys)").all() as { name: string }[]).map((column) => column.name))
+  if (!cols.has("key_ciphertext")) db.exec("ALTER TABLE api_keys ADD COLUMN key_ciphertext TEXT")
 }
 
 function ensureCurrentGatewayRequestColumns(db: AppDatabase): void {

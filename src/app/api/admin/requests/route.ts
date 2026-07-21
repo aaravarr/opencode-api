@@ -18,6 +18,7 @@ interface RequestRow {
   started_at: string;
   completed_at: string | null;
   latency_ms: number | null;
+  local_prep_ms: number | null;
   first_token_ms: number | null;
   prompt_tokens: number | null;
   completion_tokens: number | null;
@@ -34,6 +35,13 @@ interface RequestRow {
 }
 
 function mapRequest(row: RequestRow) {
+  const genLatency = row.latency_ms != null
+    ? Math.max(0, row.latency_ms - (row.local_prep_ms ?? 0) - (row.first_token_ms ?? 0))
+    : null;
+  const tpsTokens = (row.completion_tokens ?? 0) + (row.reasoning_tokens ?? 0);
+  const tps = genLatency != null && genLatency >= 50 && tpsTokens > 0
+    ? Number((tpsTokens / (genLatency / 1000)).toFixed(1))
+    : null;
   return {
     id: row.id,
     endpoint: row.endpoint,
@@ -49,6 +57,7 @@ function mapRequest(row: RequestRow) {
     attemptCount: row.attempt_count,
     latencyMs: row.latency_ms,
     firstTokenMs: row.first_token_ms,
+    localPrepMs: row.local_prep_ms,
     promptTokens: row.prompt_tokens,
     inputTokens: row.prompt_tokens,
     completionTokens: row.completion_tokens,
@@ -63,6 +72,7 @@ function mapRequest(row: RequestRow) {
     hasResponse: row.has_response === 1,
     client: row.client,
     error: row.error,
+    tps,
   };
 }
 
@@ -98,7 +108,7 @@ export function GET(request: Request): Response {
   const db = getDatabase();
   const where = conditions.join(" AND ");
   const total = Number((db.prepare(`SELECT COUNT(*) AS value FROM gateway_requests g WHERE ${where}`).get(...params) as { value: number }).value);
-  const rows = db.prepare(`SELECT g.id,g.endpoint,g.model,g.status,g.outcome,g.ok,g.stream,g.api_key_prefix,g.account_id,g.account_name,g.attempt_count,g.started_at,g.completed_at,g.latency_ms,g.first_token_ms,g.prompt_tokens,g.completion_tokens,g.total_tokens,g.cached_tokens,g.reasoning_tokens,g.text_tokens,g.image_tokens,g.audio_tokens,g.client,g.error,rb.has_request,rb.has_response FROM gateway_requests g LEFT JOIN request_bodies rb ON rb.request_id = g.id WHERE ${where} ORDER BY g.started_at DESC LIMIT ? OFFSET ?`)
+  const rows = db.prepare(`SELECT g.id,g.endpoint,g.model,g.status,g.outcome,g.ok,g.stream,g.api_key_prefix,g.account_id,g.account_name,g.attempt_count,g.started_at,g.completed_at,g.latency_ms,g.local_prep_ms,g.first_token_ms,g.prompt_tokens,g.completion_tokens,g.total_tokens,g.cached_tokens,g.reasoning_tokens,g.text_tokens,g.image_tokens,g.audio_tokens,g.client,g.error,rb.has_request,rb.has_response FROM gateway_requests g LEFT JOIN request_bodies rb ON rb.request_id = g.id WHERE ${where} ORDER BY g.started_at DESC LIMIT ? OFFSET ?`)
     .all(...params, pageSize, (page - 1) * pageSize) as RequestRow[];
   return Response.json({ items: rows.map(mapRequest), total, page, pageSize });
 }
