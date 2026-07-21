@@ -37,7 +37,8 @@
 
   let lastPhase = null;
   let collapsed = false;
-  let current = { phase: "idle", message: "准备就绪。", workspaceId: null, accountName: null };
+  let mounted = false;
+  let current = { phase: "idle", message: "准备就绪。", workspaceId: null, accountName: null, flowActive: false };
 
   const host = document.createElement("div");
   host.id = "opencode-go-overlay-host";
@@ -120,7 +121,7 @@
   const closeBtn = document.createElement("button");
   closeBtn.className = "btn";
   closeBtn.textContent = "关闭";
-  closeBtn.addEventListener("click", () => { host.remove(); window.__opencodeGoOverlay = false; });
+  closeBtn.addEventListener("click", () => { unmount(); });
   bar.appendChild(closeBtn);
 
   const body = document.createElement("div");
@@ -169,16 +170,36 @@
     meta.innerHTML = rows.map(([k, v]) => `${escapeHtml(k)}<b>${escapeHtml(v)}</b>`).join("");
   }
 
+  function mount() {
+    if (mounted) return;
+    if (!document.body) { window.setTimeout(mount, 200); return; }
+    document.body.appendChild(host);
+    mounted = true;
+  }
+
+  function unmount() {
+    if (!mounted) return;
+    host.remove();
+    mounted = false;
+    lastPhase = null;
+  }
+
   function applyUpdate(state) {
     if (!state) return;
     const prevPhase = lastPhase;
     render(state);
-    // 只有在录入流程中（flowActive=true）才弹 toast，避免用户正常浏览时被打扰
-    if (state.flowActive && state.phase && state.phase !== prevPhase) {
-      lastPhase = state.phase;
-      pushToast(state.phase, state.message);
+    // 只在录入流程中（flowActive=true）才显示窗口和弹 toast
+    if (state.flowActive) {
+      mount();
+      if (state.phase && state.phase !== prevPhase) {
+        lastPhase = state.phase;
+        pushToast(state.phase, state.message);
+      } else {
+        lastPhase = state.phase;
+      }
     } else {
-      lastPhase = state.phase;
+      // 流程结束，移除窗口
+      unmount();
     }
   }
 
@@ -190,6 +211,7 @@
     return false;
   });
 
+  // 页面加载时检查当前是否在流程中，是则挂载
   function requestInitial() {
     try {
       chrome.runtime.sendMessage({ type: "GET_VIEW_MODEL" }, (response) => {
@@ -200,11 +222,5 @@
     } catch { /* extension context invalidated */ }
   }
 
-  function mount() {
-    if (!document.body) { window.setTimeout(mount, 200); return; }
-    document.body.appendChild(host);
-    requestInitial();
-  }
-
-  mount();
+  requestInitial();
 })();

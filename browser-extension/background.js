@@ -47,7 +47,7 @@ async function updateRuntime(patch) {
 
 async function broadcastRuntime(runtime) {
   try {
-    const tabs = await chrome.tabs.query({ url: "https://opencode.ai/*" });
+    const tabs = await chrome.tabs.query({ url: ["https://opencode.ai/*", "https://auth.opencode.ai/*"] });
     for (const tab of tabs) {
       if (tab.id == null) continue;
       chrome.tabs.sendMessage(tab.id, { type: "RUNTIME_UPDATE", runtime }, () => void chrome.runtime.lastError);
@@ -194,19 +194,25 @@ async function submitConnectionOnce(force) {
       apiKey: config.apiKey,
       workspaceId: runtime.workspaceId,
     });
-    await endFlow({
+    // 先展示结果（保持 flowActive=true 让窗口和 toast 可见），延迟后退出流程
+    await updateRuntime({
       phase: result?.ok ? PHASE.SUCCESS : PHASE.ERROR,
       message: result?.message ?? (result?.ok ? "连接完成。" : "连接失败，请重试。"),
       accountId: result?.accountId ?? null,
       accountName: result?.accountName ?? null,
       lastSubmittedWorkspaceId: runtime.workspaceId,
       lastSubmittedAt: new Date().toISOString(),
+      flowActive: true,
     });
+    const delay = result?.ok ? 4000 : 6000;
+    window.setTimeout(() => void endFlow({}), delay);
   } catch (error) {
-    await endFlow({
+    await updateRuntime({
       phase: PHASE.ERROR,
       message: error instanceof Error ? error.message : "连接失败，请重试。",
+      flowActive: true,
     });
+    window.setTimeout(() => void endFlow({}), 6000);
   }
   return viewModel();
 }
