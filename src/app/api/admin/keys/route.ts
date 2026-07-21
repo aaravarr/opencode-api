@@ -13,7 +13,7 @@ const createSchema = z.object({
 export async function GET(request: Request) {
   const user = requireSession(request)
   if (user instanceof Response) return user
-  return Response.json({ apiKeys: new ApiKeyRepository(user.id).list() })
+  return Response.json({ apiKeys: new ApiKeyRepository(user.id).listWithCounts() })
 }
 
 export async function POST(request: Request) {

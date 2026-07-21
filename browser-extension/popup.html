@@ -30,8 +30,13 @@
         <div class="section-heading"><span>01</span><h2>后端配置</h2></div>
         <form id="config-form" class="form-stack">
           <label>后端地址<input id="backend-url" type="url" required placeholder="http://127.0.0.1:3000" /></label>
+          <p id="backend-detect" class="form-message" hidden></p>
           <label>API Key<input id="api-key" type="password" autocomplete="off" placeholder="粘贴你的统一入口 API Key" /></label>
-          <button class="button secondary" type="submit">保存配置</button>
+          <div class="actions">
+            <button class="button secondary" type="button" id="grant-permission">授权访问权限</button>
+            <button class="button primary" type="submit">保存配置</button>
+          </div>
+          <p id="config-status" class="form-message" aria-live="polite"></p>
         </form>
       </section>
 

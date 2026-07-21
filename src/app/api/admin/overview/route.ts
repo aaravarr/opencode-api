@@ -13,6 +13,7 @@ interface OverviewRequestRow {
   ok: number | null
   stream: number | null
   api_key_prefix: string | null
+  api_key_name: string | null
   account_id: string | null
   account_name: string | null
   attempt_count: number
@@ -51,7 +52,7 @@ export function GET(request: Request) {
   if (user instanceof Response) return user
   const db = getDatabase()
   const scalar = (sql: string) => Number((db.prepare(sql).get(user.id) as { value: number }).value)
-  const requestRows = db.prepare("SELECT g.id,g.endpoint,g.model,g.status,g.outcome,g.ok,g.stream,g.api_key_prefix,g.account_id,g.account_name,g.attempt_count,g.started_at,g.completed_at,g.latency_ms,g.first_token_ms,g.prompt_tokens,g.completion_tokens,g.total_tokens,g.cached_tokens,g.reasoning_tokens,g.client,g.error,rb.has_request,rb.has_response FROM gateway_requests g LEFT JOIN request_bodies rb ON rb.request_id = g.id WHERE g.owner_user_id=? ORDER BY g.started_at DESC LIMIT 50").all(user.id) as OverviewRequestRow[]
+  const requestRows = db.prepare("SELECT g.id,g.endpoint,g.model,g.status,g.outcome,g.ok,g.stream,g.api_key_prefix,k.name AS api_key_name,g.account_id,g.account_name,g.attempt_count,g.started_at,g.completed_at,g.latency_ms,g.first_token_ms,g.prompt_tokens,g.completion_tokens,g.total_tokens,g.cached_tokens,g.reasoning_tokens,g.client,g.error,rb.has_request,rb.has_response FROM gateway_requests g LEFT JOIN request_bodies rb ON rb.request_id = g.id LEFT JOIN api_keys k ON k.id = g.api_key_id WHERE g.owner_user_id=? ORDER BY g.started_at DESC LIMIT 50").all(user.id) as OverviewRequestRow[]
   const recentRequests = requestRows.map((row) => ({
     id: row.id,
     endpoint: row.endpoint,
@@ -62,6 +63,7 @@ export function GET(request: Request) {
     outcome: row.outcome,
     ok: row.ok === 1,
     apiKeyPrefix: row.api_key_prefix,
+    apiKeyName: row.api_key_name,
     accountId: row.account_id,
     accountName: row.account_name,
     attemptCount: row.attempt_count,

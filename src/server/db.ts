@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
   role TEXT NOT NULL CHECK(role IN ('ADMIN', 'USER')),
   status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE', 'DISABLED')),
   password_hash TEXT NOT NULL,
+  github_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -201,6 +202,7 @@ export function createDatabase(filename: string): AppDatabase {
   ensureCurrentAccountColumns(db)
   ensureCurrentGatewayRequestColumns(db)
   ensureCurrentApiKeyColumns(db)
+  ensureUserColumns(db)
   return db
 }
 
@@ -220,6 +222,11 @@ function ensureCurrentAccountColumns(db: AppDatabase): void {
 function ensureCurrentApiKeyColumns(db: AppDatabase): void {
   const cols = new Set((db.prepare("PRAGMA table_info(api_keys)").all() as { name: string }[]).map((column) => column.name))
   if (!cols.has("key_ciphertext")) db.exec("ALTER TABLE api_keys ADD COLUMN key_ciphertext TEXT")
+}
+
+function ensureUserColumns(db: AppDatabase): void {
+  const cols = new Set((db.prepare("PRAGMA table_info(users)").all() as { name: string }[]).map((column) => column.name))
+  if (!cols.has("github_id")) db.exec("ALTER TABLE users ADD COLUMN github_id TEXT")
 }
 
 function ensureCurrentGatewayRequestColumns(db: AppDatabase): void {

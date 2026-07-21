@@ -12,6 +12,7 @@ interface RequestRow {
   ok: number | null;
   stream: number | null;
   api_key_prefix: string | null;
+  api_key_name: string | null;
   account_id: string | null;
   account_name: string | null;
   attempt_count: number;
@@ -70,7 +71,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
   if (user instanceof Response) return user;
   const { id } = await context.params;
   const db = getDatabase();
-  const row = db.prepare("SELECT id,endpoint,model,status,outcome,ok,stream,api_key_prefix,account_id,account_name,attempt_count,started_at,completed_at,latency_ms,local_prep_ms,first_token_ms,prompt_tokens,completion_tokens,total_tokens,cached_tokens,reasoning_tokens,text_tokens,image_tokens,audio_tokens,client,user_agent,origin,error,request_size_bytes,response_size_bytes FROM gateway_requests WHERE id=? AND owner_user_id=?").get(id, user.id) as RequestRow | undefined;
+  const row = db.prepare("SELECT g.id,g.endpoint,g.model,g.status,g.outcome,g.ok,g.stream,g.api_key_prefix,k.name AS api_key_name,g.account_id,g.account_name,g.attempt_count,g.started_at,g.completed_at,g.latency_ms,g.local_prep_ms,g.first_token_ms,g.prompt_tokens,g.completion_tokens,g.total_tokens,g.cached_tokens,g.reasoning_tokens,g.text_tokens,g.image_tokens,g.audio_tokens,g.client,g.user_agent,g.origin,g.error,g.request_size_bytes,g.response_size_bytes FROM gateway_requests g LEFT JOIN api_keys k ON k.id=g.api_key_id WHERE g.id=? AND g.owner_user_id=?").get(id, user.id) as RequestRow | undefined;
   if (!row) return Response.json({ error: { type: "not_found", message: "请求不存在" } }, { status: 404 });
   const body = db.prepare("SELECT request_body_json,response_body_json,request_headers_json,request_truncated,response_truncated,has_request,has_response FROM request_bodies WHERE request_id=?").get(id) as BodyRow | undefined;
   const attempts = db.prepare("SELECT id,account_id,account_name,attempt_number,status,decision,error_type,error_message,latency_ms,started_at,completed_at FROM gateway_attempts WHERE request_id=? ORDER BY attempt_number").all(id) as AttemptRow[];
@@ -90,6 +91,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       outcome: row.outcome,
       ok: row.ok === 1,
       apiKeyPrefix: row.api_key_prefix,
+      apiKeyName: row.api_key_name,
       accountId: row.account_id,
       accountName: row.account_name,
       attemptCount: row.attempt_count,

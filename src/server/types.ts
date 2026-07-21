@@ -20,6 +20,7 @@ export interface UserRecord {
   status: UserStatus
   createdAt: string
   updatedAt: string
+  githubId?: string | null
 }
 
 export interface AccountRecord {

@@ -12,6 +12,7 @@ interface RequestRow {
   ok: number | null;
   stream: number | null;
   api_key_prefix: string | null;
+  api_key_name: string | null;
   account_id: string | null;
   account_name: string | null;
   attempt_count: number;
@@ -52,6 +53,7 @@ function mapRequest(row: RequestRow) {
     outcome: row.outcome,
     ok: row.ok === 1,
     apiKeyPrefix: row.api_key_prefix,
+    apiKeyName: row.api_key_name,
     accountId: row.account_id,
     accountName: row.account_name,
     attemptCount: row.attempt_count,
@@ -108,7 +110,7 @@ export function GET(request: Request): Response {
   const db = getDatabase();
   const where = conditions.join(" AND ");
   const total = Number((db.prepare(`SELECT COUNT(*) AS value FROM gateway_requests g WHERE ${where}`).get(...params) as { value: number }).value);
-  const rows = db.prepare(`SELECT g.id,g.endpoint,g.model,g.status,g.outcome,g.ok,g.stream,g.api_key_prefix,g.account_id,g.account_name,g.attempt_count,g.started_at,g.completed_at,g.latency_ms,g.local_prep_ms,g.first_token_ms,g.prompt_tokens,g.completion_tokens,g.total_tokens,g.cached_tokens,g.reasoning_tokens,g.text_tokens,g.image_tokens,g.audio_tokens,g.client,g.error,rb.has_request,rb.has_response FROM gateway_requests g LEFT JOIN request_bodies rb ON rb.request_id = g.id WHERE ${where} ORDER BY g.started_at DESC LIMIT ? OFFSET ?`)
+  const rows = db.prepare(`SELECT g.id,g.endpoint,g.model,g.status,g.outcome,g.ok,g.stream,g.api_key_prefix,k.name AS api_key_name,g.account_id,g.account_name,g.attempt_count,g.started_at,g.completed_at,g.latency_ms,g.local_prep_ms,g.first_token_ms,g.prompt_tokens,g.completion_tokens,g.total_tokens,g.cached_tokens,g.reasoning_tokens,g.text_tokens,g.image_tokens,g.audio_tokens,g.client,g.error,rb.has_request,rb.has_response FROM gateway_requests g LEFT JOIN request_bodies rb ON rb.request_id = g.id LEFT JOIN api_keys k ON k.id = g.api_key_id WHERE ${where} ORDER BY g.started_at DESC LIMIT ? OFFSET ?`)
     .all(...params, pageSize, (page - 1) * pageSize) as RequestRow[];
   return Response.json({ items: rows.map(mapRequest), total, page, pageSize });
 }

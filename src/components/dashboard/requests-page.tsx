@@ -102,7 +102,7 @@ export function RequestsPage() {
               <TableRow>
                 <TableHead className="px-4 text-xs text-muted-foreground">时间</TableHead>
                 <TableHead className="text-xs text-muted-foreground">模型</TableHead>
-                <TableHead className="text-xs text-muted-foreground">API Key</TableHead>
+                <TableHead className="text-xs text-muted-foreground">密钥</TableHead>
                 <TableHead className="text-xs text-muted-foreground">结果</TableHead>
                 <TableHead className="text-xs text-muted-foreground">服务账号</TableHead>
                 <TableHead className="text-right text-xs text-muted-foreground">尝试</TableHead>
@@ -119,7 +119,7 @@ export function RequestsPage() {
                 <TableRow key={request.id}>
                   <TableCell className="px-4 font-mono text-xs text-muted-foreground">{formatDate(request.createdAt)}</TableCell>
                   <TableCell className="font-medium text-sm">{request.model || "未知"}</TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground">{request.apiKeyPrefix || "未记录"}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{request.apiKeyName || request.apiKeyPrefix || "未记录"}</TableCell>
                   <TableCell>
                     <StatusBadge status={request.ok ? "success" : request.status != null ? "failed" : "unknown"} />
                   </TableCell>
@@ -238,6 +238,8 @@ function RequestDetailSheet({ request, onOpenChange }: { request: RequestRecord 
 
 function BasicInfo({ request }: { request: RequestDetail["request"] }) {
   const rows: Array<[string, string]> = [
+    ["密钥", request.apiKeyName || request.apiKeyPrefix || "—"],
+    ["服务账号", request.accountName || "—"],
     ["Endpoint", request.endpoint || "—"],
     ["Stream", request.stream ? "是" : "否"],
     ["HTTP 状态", request.status != null ? String(request.status) : "—"],

@@ -96,6 +96,7 @@ export interface RequestRecord {
   outcome?: string | null;
   ok?: boolean;
   apiKeyPrefix?: string | null;
+  apiKeyName?: string | null;
   accountId?: string | null;
   accountName?: string | null;
   attemptCount?: number | null;

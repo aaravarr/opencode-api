@@ -14,7 +14,7 @@ import {
   workspaceIdFromUrl,
 } from "./lib/state.js";
 
-const OPENCODE_AUTHORIZE_URL = "https://opencode.ai/auth/authorize?continue=/auth";
+const OPENCODE_AUTHORIZE_URL = "https://opencode.ai/auth/authorize?continue=/auth&ocg_flow=1";
 const LOGIN_WINDOW = Object.freeze({ width: 520, height: 720 });
 let submissionInFlight = null;
 
@@ -53,6 +53,10 @@ async function broadcastRuntime(runtime) {
   } catch { /* no tabs */ }
 }
 
+async function endFlow(patch = {}) {
+  return updateRuntime({ ...patch, flowActive: false });
+}
+
 async function viewModel() {
   const [config, runtime] = await Promise.all([loadConfig(), loadRuntime()]);
   return {
@@ -71,6 +75,9 @@ async function findWorkspaceTab() {
 }
 
 async function detectCompletedLogin() {
+  const runtime = await loadRuntime();
+  // 非流程中不主动检测/弹窗，避免用户正常浏览 opencode.ai 时被打扰
+  if (!runtime.flowActive) return updateRuntime({ phase: PHASE.IDLE, message: "准备就绪。点「使用 Google 登录」开始录入账号。" });
   await updateRuntime({
     phase: PHASE.DETECTING,
     message: "正在检查 OpenCode 登录状态…",
@@ -121,6 +128,7 @@ async function startGoogleLogin() {
     workspaceId: null,
     loginTabId: tab?.id ?? null,
     loginWindowId: loginWindow.id ?? null,
+    flowActive: true,
   });
 }
 
@@ -132,7 +140,7 @@ async function saveConfig(input) {
   if (!apiKey) throw new Error("请输入后端 API Key");
   const originPattern = `${new URL(backendUrl).origin}/*`;
   const allowed = await chrome.permissions.contains({ origins: [originPattern] });
-  if (!allowed) throw new Error("尚未授予后端地址访问权限，请重新保存配置");
+  if (!allowed) throw new Error("尚未授予后端地址访问权限，请点击「授权访问权限」按钮先授权");
   await chrome.storage.local.set({
     [CONFIG_STORAGE_KEY]: { backendUrl, apiKey },
   });
@@ -144,6 +152,13 @@ async function saveConfig(input) {
     });
   }
   return viewModel();
+}
+
+async function requestBackendPermission(backendUrl) {
+  const normalized = normalizeBackendUrl(backendUrl);
+  const originPattern = `${new URL(normalized).origin}/*`;
+  const granted = await chrome.permissions.request({ origins: [originPattern] });
+  return { granted, backendUrl: normalized };
 }
 
 async function clearConfig() {
@@ -185,7 +200,7 @@ async function submitConnectionOnce(force) {
       apiKey: config.apiKey,
       workspaceId: runtime.workspaceId,
     });
-    await updateRuntime({
+    await endFlow({
       phase: result?.ok ? PHASE.SUCCESS : PHASE.ERROR,
       message: result?.message ?? (result?.ok ? "连接完成。" : "连接失败，请重试。"),
       accountId: result?.accountId ?? null,
@@ -194,7 +209,7 @@ async function submitConnectionOnce(force) {
       lastSubmittedAt: new Date().toISOString(),
     });
   } catch (error) {
-    await updateRuntime({
+    await endFlow({
       phase: PHASE.ERROR,
       message: error instanceof Error ? error.message : "连接失败，请重试。",
     });
@@ -206,28 +221,35 @@ chrome.runtime.onInstalled.addListener(() => {
   void loadRuntime();
 });
 
+// 只有在录入流程中（flowActive=true）才响应 workspace tab 变化，避免用户正常浏览时自动上报
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!changeInfo.url && changeInfo.status !== "complete") return;
   const workspaceId = workspaceIdFromUrl(changeInfo.url ?? tab.url);
   if (!workspaceId) return;
-  void updateRuntime({
-    phase: PHASE.READY,
-    message: "已检测到 OpenCode 工作区，正在自动同步…",
-    workspaceId,
-    loginTabId: tabId,
-  }).then(() => submitConnection());
+  void loadRuntime().then((runtime) => {
+    if (!runtime.flowActive) return;
+    return updateRuntime({
+      phase: PHASE.READY,
+      message: "已检测到 OpenCode 工作区，正在自动同步…",
+      workspaceId,
+      loginTabId: tabId,
+    }).then(() => submitConnection());
+  });
 });
 
+// 只有在录入流程中才响应 auth cookie 变化
 chrome.cookies.onChanged.addListener((change) => {
   if (change.cookie.name !== "auth" || !change.cookie.domain.endsWith("opencode.ai")) return;
-  if (change.removed) {
-    void updateRuntime({
-      phase: PHASE.AWAITING_LOGIN,
-      message: "OpenCode 会话已失效，请重新使用 Google 登录。",
-    });
-    return;
-  }
-  void findWorkspaceTab().then(async (match) => {
+  void loadRuntime().then(async (runtime) => {
+    if (!runtime.flowActive) return;
+    if (change.removed) {
+      await updateRuntime({
+        phase: PHASE.AWAITING_LOGIN,
+        message: "OpenCode 会话已失效，请重新使用 Google 登录。",
+      });
+      return;
+    }
+    const match = await findWorkspaceTab();
     if (!match) return;
     await updateRuntime({
       phase: PHASE.READY,
@@ -242,7 +264,7 @@ chrome.cookies.onChanged.addListener((change) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   void loadRuntime().then((runtime) => {
     if (runtime.loginTabId !== tabId || runtime.phase !== PHASE.AWAITING_LOGIN) return;
-    return updateRuntime({
+    return endFlow({
       phase: PHASE.IDLE,
       message: "授权窗口已关闭，可以重新开始登录。",
       loginTabId: null,
@@ -266,7 +288,7 @@ chrome.windows.onBoundsChanged.addListener((window) => {
 chrome.windows.onRemoved.addListener((windowId) => {
   void loadRuntime().then((runtime) => {
     if (runtime.loginWindowId !== windowId) return;
-    return updateRuntime({
+    return endFlow({
       phase: runtime.phase === PHASE.SUCCESS ? PHASE.SUCCESS : PHASE.IDLE,
       message: runtime.phase === PHASE.SUCCESS ? runtime.message : "授权窗口已关闭，可以重新开始登录。",
       loginTabId: null,
@@ -291,11 +313,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         return submitConnection(true);
       case "SAVE_CONFIG":
         return saveConfig(message.payload);
+      case "REQUEST_PERMISSION":
+        return requestBackendPermission(message.payload?.backendUrl);
       case "CLEAR_CONFIG":
         return clearConfig();
       case "OPEN_OPTIONS":
         await chrome.runtime.openOptionsPage();
         return { ok: true };
+      case "DETECT_BACKEND_TAB":
+        return detectBackendTab();
       default:
         throw new Error("未知的插件操作");
     }
@@ -311,3 +337,32 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     );
   return true;
 });
+
+// 扫描当前打开的标签页，尝试识别用户可能正在使用的后端地址
+async function detectBackendTab() {
+  try {
+    const config = await loadConfig();
+    if (config?.backendUrl) {
+      // 已配置则检查是否有对应标签页打开
+      const origin = new URL(config.backendUrl).origin;
+      const tabs = await chrome.tabs.query({ url: `${origin}/*` });
+      return { detected: tabs.length > 0, backendUrl: config.backendUrl, configured: true };
+    }
+    // 未配置：扫描所有标签页，找看起来像本系统的页面（含 ocg 或 opencode-api 路径特征）
+    const allTabs = await chrome.tabs.query({});
+    for (const tab of allTabs) {
+      if (!tab.url) continue;
+      try {
+        const url = new URL(tab.url);
+        if (!["http:", "https:"].includes(url.protocol)) continue;
+        if (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname.endsWith(".local")) {
+          // 本地地址，可能是开发/自部署后端
+          return { detected: true, backendUrl: `${url.origin}`, configured: false };
+        }
+      } catch { /* ignore */ }
+    }
+    return { detected: false, backendUrl: null, configured: false };
+  } catch {
+    return { detected: false, backendUrl: null, configured: false };
+  }
+}

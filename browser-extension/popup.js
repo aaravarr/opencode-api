@@ -17,7 +17,8 @@ function send(type, payload) {
 function render(model) {
   const runtime = model?.runtime ?? {};
   const config = model?.config ?? {};
-  $("backend-url").value = config.backendUrl ?? "";
+  // 只在输入框为空（用户未编辑）时才回填，避免覆盖用户正在输入的内容
+  if (!$("backend-url").value) $("backend-url").value = config.backendUrl ?? "";
   $("api-key").placeholder = config.apiKeyConfigured ? "已保存，留空保持不变" : "粘贴你的统一入口 API Key";
   status.textContent = runtime.message ?? "准备就绪。";
   $("phase-dot").dataset.phase = runtime.phase ?? "idle";
@@ -31,20 +32,71 @@ async function refresh() {
   try {
     const model = await send("GET_VIEW_MODEL");
     render(model);
+    // 自动检测后端标签页
+    void detectBackendTab();
     if (model?.config?.backendUrl) void runUpdateCheck();
   } catch (error) { status.textContent = error.message; }
 }
 
+// 扫描当前打开的标签页，若检测到后端地址则提示快速填充
+async function detectBackendTab() {
+  try {
+    const result = await send("DETECT_BACKEND_TAB");
+    const hint = $("backend-detect");
+    if (result?.detected && result?.backendUrl) {
+      const current = $("backend-url").value.trim();
+      if (!current || current !== result.backendUrl) {
+        hint.innerHTML = `检测到后端 <code>${result.backendUrl}</code> <button class="text-button" id="fill-backend" type="button">填入</button>`;
+        hint.hidden = false;
+        $("fill-backend")?.addEventListener("click", () => {
+          $("backend-url").value = result.backendUrl;
+          hint.hidden = true;
+        });
+      } else {
+        hint.hidden = true;
+      }
+    } else {
+      hint.hidden = true;
+    }
+  } catch { /* ignore */ }
+}
+
+// 前置申请后端地址的访问权限（在保存前完成，避免保存时弹权限且清空表单）
+$("grant-permission").addEventListener("click", async () => {
+  const btn = $("grant-permission");
+  const hint = $("config-status");
+  const raw = $("backend-url").value.trim();
+  if (!raw) { hint.textContent = "请先填写后端地址"; return; }
+  btn.disabled = true;
+  try {
+    const result = await send("REQUEST_PERMISSION", { backendUrl: raw });
+    if (result?.granted) {
+      hint.textContent = "已授权，可以保存配置了。";
+      // 授权成功后回填规范化地址
+      if (result?.backendUrl) $("backend-url").value = result.backendUrl;
+    } else {
+      hint.textContent = "未授权，无法上报账号。";
+    }
+  } catch (error) {
+    hint.textContent = error.message || "授权失败";
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const hint = $("config-status");
+  hint.textContent = "正在保存…";
   try {
     const backendUrl = normalizeBackendUrl($("backend-url").value);
-    const origin = `${new URL(backendUrl).origin}/*`;
-    const granted = await chrome.permissions.request({ origins: [origin] });
-    if (!granted) throw new Error("需要后端地址访问权限才能上报账号");
     render(await send("SAVE_CONFIG", { backendUrl, apiKey: $("api-key").value }));
+    // 保存成功后才清空 API Key 输入框（保留后端地址）
     $("api-key").value = "";
-  } catch (error) { status.textContent = error.message; }
+    hint.textContent = "配置已保存。";
+  } catch (error) {
+    hint.textContent = error.message;
+  }
 });
 
 $("google-login").addEventListener("click", async () => {

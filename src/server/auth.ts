@@ -34,6 +34,7 @@ function userFromRow(row: Row): UserRecord {
     id: String(row.id), username: String(row.username), displayName: String(row.display_name),
     role: row.role as UserRole, status: row.status as UserStatus,
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+    githubId: row.github_id != null ? String(row.github_id) : null,
   }
 }
 function tokenHash(token: string) { return createHash("sha256").update(token).digest("hex") }
@@ -97,6 +98,46 @@ export class AuthService {
     this.checkRateLimit("login", limitKey)
     this.recordFailure("login", limitKey)
     throw new AuthError("Invalid username or password", 401, "invalid_credentials")
+  }
+
+  async loginWithGitHub(code: string, redirectUri: string): Promise<AuthResult> {
+    const clientId = process.env.GITHUB_CLIENT_ID
+    const clientSecret = process.env.GITHUB_CLIENT_SECRET
+    if (!clientId || !clientSecret) throw new AuthError("GitHub OAuth is not configured", 500, "github_not_configured")
+    const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, code, redirect_uri: redirectUri }),
+      signal: AbortSignal.timeout(10000),
+    })
+    const tokenData = await tokenResponse.json().catch(() => null) as { access_token?: string; error?: string } | null
+    if (!tokenResponse.ok || !tokenData?.access_token) throw new AuthError("GitHub OAuth token exchange failed", 401, "github_token_failed")
+    const userResponse = await fetch("https://api.github.com/user", {
+      headers: { Authorization: `Bearer ${tokenData.access_token}`, Accept: "application/vnd.github+json" },
+      signal: AbortSignal.timeout(10000),
+    })
+    const ghUser = await userResponse.json().catch(() => null) as { id?: number; login?: string; name?: string | null } | null
+    if (!userResponse.ok || !ghUser?.id) throw new AuthError("Failed to fetch GitHub user", 401, "github_user_failed")
+    const githubId = String(ghUser.id)
+    const existing = this.db.prepare("SELECT * FROM users WHERE github_id = ?").get(githubId) as Row | undefined
+    if (existing) {
+      if (existing.status !== "ACTIVE") throw new AuthError("User is disabled", 403, "user_disabled")
+      return this.createSession(userFromRow(existing))
+    }
+    // 首次 GitHub 登录：自动创建用户
+    const username = `gh_${ghUser.login ?? githubId}`
+    const normalized = normalizeUsername(username)
+    const displayName = ghUser.name?.trim() || ghUser.login || username
+    const timestamp = nowIso()
+    const id = randomUUID()
+    try {
+      this.db.prepare(`INSERT INTO users(id, username, username_normalized, display_name, role, status, password_hash, github_id, created_at, updated_at) VALUES (?, ?, ?, ?, 'USER', 'ACTIVE', '', ?, ?, ?)`)
+        .run(id, username, normalized, displayName, githubId, timestamp, timestamp)
+    } catch (cause) {
+      if (cause instanceof Error && cause.message.includes("UNIQUE")) throw new AuthError("GitHub username collision, please contact admin", 409, "username_exists")
+      throw cause
+    }
+    return this.createSession(userFromRow(this.db.prepare("SELECT * FROM users WHERE id = ?").get(id) as Row))
   }
 
   authenticateSession(token: string): UserRecord | null {

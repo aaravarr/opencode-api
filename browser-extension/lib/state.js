@@ -20,6 +20,9 @@ export function initialRuntime(configured = false) {
     accountName: null,
     loginTabId: null,
     loginWindowId: null,
+    // 是否处于账号录入流程中。只有用户主动点击「使用 Google 登录」才会置 true，
+    // 流程结束（成功/失败/关闭窗口）后置 false。非流程中的 tab/cookie 变化不会触发自动上报。
+    flowActive: false,
     lastSubmittedWorkspaceId: null,
     lastSubmittedAt: null,
     updatedAt: new Date().toISOString(),
@@ -33,6 +36,7 @@ export function publicRuntime(runtime) {
     workspaceId: runtime?.workspaceId ?? null,
     accountId: runtime?.accountId ?? null,
     accountName: runtime?.accountName ?? null,
+    flowActive: Boolean(runtime?.flowActive),
     updatedAt: runtime?.updatedAt ?? null,
   };
 }
