@@ -205,14 +205,14 @@ async function submitConnectionOnce(force) {
       flowActive: true,
     });
     const delay = result?.ok ? 4000 : 6000;
-    window.setTimeout(() => void endFlow({}), delay);
+    setTimeout(() => void endFlow({}), delay);
   } catch (error) {
     await updateRuntime({
       phase: PHASE.ERROR,
       message: error instanceof Error ? error.message : "连接失败，请重试。",
       flowActive: true,
     });
-    window.setTimeout(() => void endFlow({}), 6000);
+    setTimeout(() => void endFlow({}), 6000);
   }
   return viewModel();
 }
