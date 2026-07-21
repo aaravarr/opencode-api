@@ -348,27 +348,27 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 async function detectBackendTab() {
   try {
     const config = await loadConfig();
-    if (config?.backendUrl) {
-      // 已配置则检查是否有对应标签页打开
-      const origin = new URL(config.backendUrl).origin;
-      const tabs = await chrome.tabs.query({ url: `${origin}/*` });
-      return { detected: tabs.length > 0, backendUrl: config.backendUrl, configured: true };
-    }
-    // 未配置：扫描所有标签页，找看起来像本系统的页面（含 ocg 或 opencode-api 路径特征）
+    const configuredBackend = config?.backendUrl ?? null;
+    // 扫描所有 http/https 标签页，通过页面标题识别本系统
+    // 本系统页面 title 包含 "OpenCode Go Console"
     const allTabs = await chrome.tabs.query({});
     for (const tab of allTabs) {
-      if (!tab.url) continue;
+      if (!tab.url || !tab.title) continue;
       try {
         const url = new URL(tab.url);
         if (!["http:", "https:"].includes(url.protocol)) continue;
-        if (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname.endsWith(".local")) {
-          // 本地地址，可能是开发/自部署后端
-          return { detected: true, backendUrl: `${url.origin}`, configured: false };
+        if (tab.title.includes("OpenCode Go")) {
+          const detected = url.origin;
+          // 已配置且与检测到的一致，则不提示
+          if (configuredBackend && new URL(configuredBackend).origin === detected) {
+            return { detected: true, backendUrl: configuredBackend, configured: true, sameAsConfigured: true };
+          }
+          return { detected: true, backendUrl: detected, configured: Boolean(configuredBackend), sameAsConfigured: false };
         }
       } catch { /* ignore */ }
     }
-    return { detected: false, backendUrl: null, configured: false };
+    return { detected: false, backendUrl: null, configured: Boolean(configuredBackend), sameAsConfigured: false };
   } catch {
-    return { detected: false, backendUrl: null, configured: false };
+    return { detected: false, backendUrl: null, configured: false, sameAsConfigured: false };
   }
 }

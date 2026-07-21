@@ -14,6 +14,10 @@ function send(type, payload) {
   });
 }
 
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
 function render(model) {
   const runtime = model?.runtime ?? {};
   const config = model?.config ?? {};
@@ -44,20 +48,19 @@ async function detectBackendTab() {
   try {
     const result = await send("DETECT_BACKEND_TAB");
     const hint = $("backend-detect");
-    if (result?.detected && result?.backendUrl) {
-      const current = $("backend-url").value.trim();
-      if (!current || current !== result.backendUrl) {
-        hint.innerHTML = `检测到后端 <code>${result.backendUrl}</code> <button class="text-button" id="fill-backend" type="button">填入</button>`;
+    // 只有检测到后端、且与当前输入框值不一致时才提示
+    if (result?.detected && result?.backendUrl && !result?.sameAsConfigured) {
+      const current = $("backend-url").value.trim().replace(/\/$/, "");
+      const detected = result.backendUrl.replace(/\/$/, "");
+      if (current !== detected) {
+        hint.innerHTML = `检测到后端 <code>${escapeHtml(detected)}</code> <button class="text-button" id="fill-backend" type="button">填入</button>`;
         hint.hidden = false;
         $("fill-backend")?.addEventListener("click", () => {
-          $("backend-url").value = result.backendUrl;
+          $("backend-url").value = detected;
           hint.hidden = true;
         });
-      } else {
-        hint.hidden = true;
+        return;
       }
-    } else {
-      hint.hidden = true;
     }
   } catch { /* ignore */ }
 }
