@@ -173,9 +173,12 @@
     if (!state) return;
     const prevPhase = lastPhase;
     render(state);
-    if (state.phase && state.phase !== prevPhase) {
+    // 只有在录入流程中（flowActive=true）才弹 toast，避免用户正常浏览时被打扰
+    if (state.flowActive && state.phase && state.phase !== prevPhase) {
       lastPhase = state.phase;
       pushToast(state.phase, state.message);
+    } else {
+      lastPhase = state.phase;
     }
   }
 
