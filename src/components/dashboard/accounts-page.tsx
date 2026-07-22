@@ -257,10 +257,19 @@ export function AccountsPage() {
                     </TableCell>
                     <TableCell><PoolTypeBadge poolType={account.poolType} /></TableCell>
                     <TableCell><AccountBadges account={account} /></TableCell>
-                    <TableCell><QuotaStatus label="5H" quota={getQuota(account, "fiveHour")} /></TableCell>
-                    <TableCell><QuotaStatus label="WEEK" quota={getQuota(account, "weekly")} /></TableCell>
+                    {account.poolType === "xai-grok" ? (
+                      <>
+                        <TableCell><QuotaStatus label="24H" quota={getQuota(account, "rolling24h")} /></TableCell>
+                        <TableCell><span className="font-mono text-[10px] text-muted-foreground">—</span></TableCell>
+                      </>
+                    ) : (
+                      <>
+                        <TableCell><QuotaStatus label="5H" quota={getQuota(account, "fiveHour")} /></TableCell>
+                        <TableCell><QuotaStatus label="WEEK" quota={getQuota(account, "weekly")} /></TableCell>
+                      </>
+                    )}
                     {showMonthly ? (
-                      <TableCell>{isGo ? <QuotaStatus label="MONTH" quota={getQuota(account, "monthly")} /> : <span className="font-mono text-[10px] text-muted-foreground">—</span>}</TableCell>
+                      <TableCell>{isGo ? <QuotaStatus label="MONTH" quota={getQuota(account, "monthly")} /> : (account.poolType === "xai-grok" ? <span className="font-mono text-[10px] text-muted-foreground">滚动</span> : <span className="font-mono text-[10px] text-muted-foreground">—</span>)}</TableCell>
                     ) : null}
                     <TableCell className="space-y-1.5">
                       <StatusBadge status={account.subscriptionState} />
@@ -386,6 +395,7 @@ function AccountDetailSheet({ account, onOpenChange, onPreferred, onToggle, onRe
                   {quotaKinds.includes("fiveHour") ? <div className="min-w-0 rounded-md border bg-[#fafafa] p-3.5"><QuotaStatus label="5 小时" quota={getQuota(account, "fiveHour")} variant="card" /></div> : null}
                   {quotaKinds.includes("weekly") ? <div className="min-w-0 rounded-md border bg-[#fafafa] p-3.5"><QuotaStatus label="每周" quota={getQuota(account, "weekly")} variant="card" /></div> : null}
                   {quotaKinds.includes("monthly") ? <div className="min-w-0 rounded-md border bg-[#fafafa] p-3.5"><QuotaStatus label="每月" quota={getQuota(account, "monthly")} variant="card" /></div> : null}
+                  {quotaKinds.includes("rolling24h") ? <div className="min-w-0 rounded-md border bg-[#fafafa] p-3.5"><QuotaStatus label="滚动 24 小时" quota={getQuota(account, "rolling24h")} variant="card" /></div> : null}
                 </div>
               </DetailSection>
               {!isCpa ? (

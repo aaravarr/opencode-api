@@ -2,13 +2,14 @@ import type { AccountRecord, QuotaKind } from "../types"
 
 // Pool Type
 
-export const POOL_TYPES = ["opencode-go", "openai-cpa", "openai-oauth"] as const
+export const POOL_TYPES = ["opencode-go", "openai-cpa", "openai-oauth", "xai-grok"] as const
 export type PoolType = (typeof POOL_TYPES)[number]
 
 export const POOL_TYPE_LABELS: Record<PoolType, string> = {
   "opencode-go": "OpenCode Go",
   "openai-cpa": "OpenAI CPA",
   "openai-oauth": "OpenAI OAuth",
+  "xai-grok": "xAI Grok",
 }
 
 // Quota

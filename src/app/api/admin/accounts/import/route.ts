@@ -3,8 +3,14 @@ import { getDatabase } from "@/server/db"
 import { z } from "zod"
 import { requireSession } from "../../_auth"
 import type { PoolType } from "@/server/types"
+import { apiFetch } from "@/server/api-fetch"
 
 export const runtime = "nodejs"
+
+// xAI OAuth constants (mirrors internal/pkg/xai from Wei-Shaw/sub2api).
+const XAI_OAUTH_TOKEN_URL = "https://auth.x.ai/oauth2/token"
+const XAI_DEFAULT_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
+const REQUEST_TIMEOUT_MS = 30000
 
 // Sub2API JSON account shape — only the fields we care about for import.
 const sub2ApiAccountSchema = z.object({
@@ -29,9 +35,17 @@ const sub2ApiPayloadSchema = z.object({
 // platform=openai + credentials.auth_mode=personalAccessToken → "openai-cpa"
 // platform=openai + type=oauth (with refresh_token)             → "openai-oauth"
 // platform=openai + type=apikey                                 → "openai-cpa" (treat as token-based)
+// platform=grok  + type=oauth (refresh_token or access_token)   → "xai-grok"
 // Everything else → skipped
 function resolvePoolType(platform: string, type: string, credentials: Record<string, unknown>): PoolType | null {
-  if (platform !== "openai") return null
+  const platformLower = platform.toLowerCase()
+  if (platformLower === "grok" || platformLower === "xai") {
+    // Grok accounts are OAuth-only; accept either refresh_token or access_token.
+    const hasToken = Boolean(credentials.refresh_token || credentials.access_token)
+    if (hasToken && (type === "oauth" || type === "apikey" || !type)) return "xai-grok"
+    return null
+  }
+  if (platformLower !== "openai") return null
   const authMode = String(credentials.auth_mode ?? "").toLowerCase()
   if (authMode === "personalaccesstoken" || authMode === "personal_access_token") return "openai-cpa"
   if (type === "oauth") {
@@ -45,6 +59,45 @@ function resolvePoolType(platform: string, type: string, credentials: Record<str
     return "openai-cpa"
   }
   return null
+}
+
+// Refresh an xAI OAuth refresh_token to obtain a fresh access_token + rotated
+// refresh_token. If the refresh fails we fall back to the provided
+// access_token (if any) so callers can still import.
+async function refreshXaiToken(
+  refreshToken: string,
+  clientId: string,
+): Promise<{
+  accessToken: string
+  refreshToken: string
+  expiresAt: string
+} | null> {
+  try {
+    const resp = await apiFetch(XAI_OAUTH_TOKEN_URL, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: clientId || XAI_DEFAULT_CLIENT_ID,
+      }).toString(),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+    if (!resp.ok) return null
+    const tokenResp = (await resp.json()) as {
+      access_token?: string
+      refresh_token?: string
+      expires_in?: number
+    }
+    if (!tokenResp.access_token) return null
+    return {
+      accessToken: tokenResp.access_token,
+      refreshToken: tokenResp.refresh_token || refreshToken,
+      expiresAt: String(Math.floor(Date.now() / 1000) + (tokenResp.expires_in ?? 21600)),
+    }
+  } catch {
+    return null
+  }
 }
 
 export async function POST(request: Request) {
@@ -71,8 +124,62 @@ export async function POST(request: Request) {
     }
 
     try {
-      // Extract credential fields we need to store
       const credentials = acct.credentials
+
+      if (poolType === "xai-grok") {
+        const refreshToken = String(credentials.refresh_token ?? "").trim()
+        const clientId = String(credentials.client_id ?? "").trim()
+        let accessToken = String(credentials.access_token ?? "").trim()
+        let storedRefreshToken = refreshToken
+        let expiresAt = String(credentials.expires_at ?? "").trim()
+        const email = String(credentials.email ?? "").trim()
+
+        // Efficient ingestion: when only a refresh_token is provided, refresh
+        // it now to mint an access_token + rotated refresh_token so the
+        // account is immediately usable without a second round-trip.
+        if (!accessToken && refreshToken) {
+          const refreshed = await refreshXaiToken(refreshToken, clientId)
+          if (!refreshed) {
+            errors.push({ name: acct.name, message: "xAI refresh_token is invalid or could not be refreshed, and no access_token was provided" })
+            continue
+          }
+          accessToken = refreshed.accessToken
+          storedRefreshToken = refreshed.refreshToken
+          expiresAt = refreshed.expiresAt
+        }
+
+        if (!accessToken) {
+          errors.push({ name: acct.name, message: "No access_token or refresh_token in credentials" })
+          continue
+        }
+
+        const subscriptionTier = String(credentials.subscription_tier ?? "").trim()
+        const entitlementStatus = String(credentials.entitlement_status ?? "").trim()
+
+        const account = accountRepo.createProviderAccount({
+          name: acct.name,
+          poolType: "xai-grok",
+          email: email || null,
+        })
+
+        const credData: Record<string, string> = { token: accessToken }
+        if (storedRefreshToken) credData.refreshToken = storedRefreshToken
+        if (expiresAt) credData.expiresAt = expiresAt
+        credData.clientId = clientId || XAI_DEFAULT_CLIENT_ID
+        if (subscriptionTier) credData.subscriptionTier = subscriptionTier
+        if (entitlementStatus) credData.entitlementStatus = entitlementStatus
+        credRepo.upsert({ accountId: account.id, poolType, credentialData: credData })
+
+        if (acct.concurrency && acct.concurrency !== 3) {
+          accountRepo.updateState(account.id, { maxConcurrency: acct.concurrency })
+        }
+
+        imported++
+        importedAccounts.push({ id: account.id, name: acct.name, poolType })
+        continue
+      }
+
+      // OpenAI CPA / OAuth import path (existing behavior).
       const token = String(credentials.access_token ?? credentials.api_key ?? "")
       if (!token) {
         errors.push({ name: acct.name, message: "No access_token or api_key in credentials" })
@@ -82,10 +189,8 @@ export async function POST(request: Request) {
       const email = String(credentials.email ?? "")
       const planType = String(credentials.plan_type ?? "")
 
-      // Create the account record
       const account = accountRepo.createCpaAccount({ name: acct.name, email: email || null })
 
-      // Store the encrypted credentials
       const credData: Record<string, string> = { token }
       if (chatgptAccountId) credData.chatgptAccountId = chatgptAccountId
       if (planType) credData.planType = planType

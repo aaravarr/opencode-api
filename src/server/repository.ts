@@ -89,6 +89,29 @@ export class AccountRepository {
     return this.get(id)!
   }
 
+  /**
+   * Generic provider-backed account creation for pool types that don't use
+   * the browser extension (openai-cpa, openai-oauth, xai-grok, ...). Stores
+   * placeholder auth/cookie ciphertext; the provider layer populates
+   * `provider_credentials` separately. Defaults match createCpaAccount.
+   */
+  createProviderAccount(input: { name: string; poolType: PoolType; email?: string | null; subscriptionState?: string }): AccountRecord {
+    const id = randomUUID()
+    const timestamp = nowIso()
+    const ordinal = Number((this.db.prepare("SELECT COALESCE(MAX(ordinal), -1) + 1 value FROM accounts WHERE owner_user_id=?").get(this.ownerUserId) as Row).value)
+    const workspaceId = `${input.poolType === "xai-grok" ? "grok" : input.poolType}_${id}`
+    this.db.prepare(`INSERT INTO accounts(id, owner_user_id, name, pool_type, workspace_id, go_key_id, last_synced_at,
+      auth_cookie_ciphertext, go_api_key_ciphertext, subscription_state, billing_guard, next_usage_check_at, ordinal, created_at, updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      id, this.ownerUserId, input.name, input.poolType, workspaceId, input.poolType, timestamp,
+      this.secretVault().encrypt("unused"), this.secretVault().encrypt("unused"),
+      input.subscriptionState ?? "ACTIVE", "VERIFIED_GO_ONLY",
+      new Date(Date.now() + 60_000).toISOString(), ordinal, timestamp, timestamp,
+    )
+    if (input.email) this.db.prepare("UPDATE accounts SET email=? WHERE id=? AND owner_user_id=?").run(input.email, id, this.ownerUserId)
+    return this.get(id)!
+  }
+
 
   getCredential(accountId: string): AccountCredential | null {
     const row = this.db.prepare("SELECT * FROM accounts WHERE id = ? AND owner_user_id = ?").get(accountId, this.ownerUserId) as Row | undefined

@@ -6,6 +6,7 @@ export const POOL_TYPE_META: Record<string, { label: string; description: string
   "opencode-go": { label: "OpenCode Go", description: "Google 登录 + Go API Key", quotaKinds: ["fiveHour", "weekly", "monthly"] },
   "openai-cpa": { label: "OpenAI CPA", description: "ChatGPT Access Token", quotaKinds: ["fiveHour", "weekly"] },
   "openai-oauth": { label: "OpenAI OAuth", description: "OAuth 授权", quotaKinds: ["fiveHour", "weekly"] },
+  "xai-grok": { label: "xAI Grok", description: "xAI 免费 OAuth，滚动 24h 100 万 token", quotaKinds: ["rolling24h"] },
 };
 
 export function getPoolLabel(poolType?: string | null) {
@@ -21,6 +22,7 @@ export function PoolTypeBadge({ poolType }: { poolType?: string | null }) {
   const meta = POOL_TYPE_META[type];
   const isCpa = type === "openai-cpa";
   const isOauth = type === "openai-oauth";
+  const isGrok = type === "xai-grok";
   return (
     <Badge
       variant="outline"
@@ -29,7 +31,9 @@ export function PoolTypeBadge({ poolType }: { poolType?: string | null }) {
           ? "border-violet/20 bg-violet-soft text-violet-deep"
           : isOauth
             ? "border-cyan/30 bg-cyan-soft text-cyan-deep"
-            : "border-info/20 bg-info-soft text-info"
+            : isGrok
+              ? "border-emerald/30 bg-emerald-soft text-emerald-deep"
+              : "border-info/20 bg-info-soft text-info"
       }`}
     >
       {meta?.label ?? type}
@@ -116,9 +120,16 @@ export function BillingSafetyBadge({ account }: { account: Account }) {
   );
 }
 
-export function getQuota(account: Account, key: "fiveHour" | "weekly" | "monthly") {
+export function getQuota(account: Account, key: "fiveHour" | "weekly" | "monthly" | "rolling24h") {
   if (Array.isArray(account.quotaWindows)) {
-    const aliases = key === "fiveHour" ? ["fiveHour", "five_hour", "5h", "ROLLING", "FIVE_HOUR"] : key === "weekly" ? ["weekly", "week", "WEEKLY"] : ["monthly", "month", "MONTHLY"];
+    const aliases =
+      key === "fiveHour"
+        ? ["fiveHour", "five_hour", "5h", "FIVE_HOUR"]
+        : key === "rolling24h"
+          ? ["rolling24h", "ROLLING_24H", "ROLLING", "24h"]
+          : key === "weekly"
+            ? ["weekly", "week", "WEEKLY"]
+            : ["monthly", "month", "MONTHLY"];
     const found = account.quotaWindows.find((quota) => aliases.includes(String(quota.kind || "")));
     if (!found) return null;
     return {
@@ -127,7 +138,12 @@ export function getQuota(account: Account, key: "fiveHour" | "weekly" | "monthly
       resetInSec: found.resetInSec ?? found.retryAfterSeconds,
     };
   }
-  return account.quotaWindows?.[key] ?? account.quotas?.[key] ?? account[key] ?? null;
+  // Legacy/shaped accounts only expose fiveHour/weekly/monthly keys; the
+  // rolling24h kind is a modern-windowed pool with no legacy slot, so remap it
+  // to fiveHour for the backcompat lookup.
+  const legacyKey = key === "rolling24h" ? "fiveHour" : key;
+  const legacy = account.quotaWindows?.[legacyKey] ?? account.quotas?.[legacyKey] ?? account[legacyKey];
+  return legacy ?? null;
 }
 
 export function QuotaStatus({

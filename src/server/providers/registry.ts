@@ -11,6 +11,16 @@ export const POOL_TYPE_METADATA: Record<PoolType, PoolTypeMeta> = {
     quotaKinds: ["FIVE_HOUR", "WEEKLY", "MONTHLY"] as readonly QuotaKind[],
     credentialFields: [],
   },
+  "xai-grok": {
+    type: "xai-grok",
+    label: "xAI Grok",
+    description: "xAI free OAuth (refresh token). Upstream: api.x.ai/v1. Rolling-24h 1M token window.",
+    quotaKinds: ["ROLLING_24H"] as readonly QuotaKind[],
+    credentialFields: [
+      { key: "refreshToken", label: "Refresh Token", required: true, type: "password" },
+      { key: "clientId", label: "Client ID (optional)", required: false, type: "text" },
+    ],
+  },
   "openai-cpa": {
     type: "openai-cpa",
     label: "OpenAI CPA",

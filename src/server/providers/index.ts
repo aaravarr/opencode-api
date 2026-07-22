@@ -1,6 +1,7 @@
 import { getProviderRegistry } from "./registry"
 import { OpenCodeGoProvider } from "./opencode-go"
 import { OpenAICPAProvider } from "./openai-cpa"
+import { XAIGrokProvider } from "./xai-grok"
 
 // Register all built-in providers. This runs once on first import.
 
@@ -13,6 +14,7 @@ export function ensureProvidersRegistered(): void {
   registry.register(new OpenCodeGoProvider())
   registry.register(new OpenAICPAProvider("openai-cpa"))
   registry.register(new OpenAICPAProvider("openai-oauth"))
+  registry.register(new XAIGrokProvider())
 }
 
 // Trigger registration on module load

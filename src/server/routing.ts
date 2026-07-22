@@ -16,6 +16,15 @@ export class NoEligibleAccountError extends Error {
   }
 }
 
+// Pool types whose quota is a rolling window (e.g. the xAI free tier's
+// rolling 24h token window). For these pools we balance load by the account
+// with the most remaining quota rather than round-robining to ordinal, which
+// would otherwise burn each account to 100% before moving on and waste the
+// aggregated daily budget. Go/OpenAI pools keep ordinal behavior.
+function isRollingDayPool(poolType: PoolType): boolean {
+  return poolType === "xai-grok"
+}
+
 function isAccountReady(account: ReturnType<AccountRepository["list"]>[number]): boolean {
   const provider = tryGetProvider(account.poolType)
   if (provider) return provider.isAccountReady(account)
@@ -86,6 +95,16 @@ export class RoutingService {
         WHERE owner_user_id = ? AND usage_percent >= 100 AND (reset_at IS NULL OR reset_at > ?)`)
         .all(this.ownerUserId, timestamp) as { account_id: string; reset_at: string | null }[]
       const blocked = new Set(activeBlocks.map((row) => row.account_id))
+      // Latest stored usage_percent for each account (any kind). Used to
+      // balance load across rolling-window pool accounts instead of always
+      // picking the lowest ordinal.
+      const usageRows = this.db.prepare(`SELECT account_id, MAX(last_observed_at) AS latest, usage_percent FROM quota_windows
+        WHERE owner_user_id = ? GROUP BY account_id`)
+        .all(this.ownerUserId) as { account_id: string; usage_percent: number | null }[]
+      const usagePct = new Map<string, number>()
+      for (const row of usageRows) {
+        if (row.usage_percent != null) usagePct.set(row.account_id, Number(row.usage_percent))
+      }
       const inFlight = new Map<string, number>()
       for (const row of this.db.prepare(`SELECT account_id, COUNT(*) AS count FROM route_leases
         WHERE owner_user_id = ? AND completed_at IS NULL AND expires_at > ? GROUP BY account_id`)
@@ -115,6 +134,21 @@ export class RoutingService {
 
       // Model routing: determine pool type priority from routing rules.
       const poolTypePriority = this.currentModel ? this.modelRouting.resolveModelPriority(this.currentModel) : null
+      // For rolling-day pools (xAI free), pick the account with the most
+      // remaining quota first to flatten the aggregated daily budget and avoid
+      // burning each seat to 100% before moving on. Go/OpenAI pools keep the
+      // stable ordinal ordering.
+      const usageAwareCompare = (a: AccountRecord, b: AccountRecord): number => {
+        const aRolling = isRollingDayPool(a.poolType)
+        const bRolling = isRollingDayPool(b.poolType)
+        if (aRolling || bRolling) {
+          const aUsage = usagePct.get(a.id) ?? 0
+          const bUsage = usagePct.get(b.id) ?? 0
+          if (aUsage !== bUsage) return aUsage - bUsage
+          return (a.lastSelectedAt ?? "").localeCompare(b.lastSelectedAt ?? "")
+        }
+        return a.ordinal - b.ordinal
+      }
       let orderedEligible = eligible
       if (poolTypePriority && poolTypePriority.length > 0) {
         const poolTypeOrder = new Map<string, number>()
@@ -123,14 +157,14 @@ export class RoutingService {
           const aIdx = poolTypeOrder.get(a.poolType) ?? Number.MAX_SAFE_INTEGER
           const bIdx = poolTypeOrder.get(b.poolType) ?? Number.MAX_SAFE_INTEGER
           if (aIdx !== bIdx) return aIdx - bIdx
-          return a.ordinal - b.ordinal
+          return usageAwareCompare(a, b)
         })
       }
 
       const byId = new Map(eligible.map((account) => [account.id, account]))
       const ordered = poolTypePriority && poolTypePriority.length > 0
         ? orderedEligible
-        : [...eligible].sort((a, b) => a.ordinal - b.ordinal)
+        : [...eligible].sort(usageAwareCompare)
       let selected = state.preferredAccountId ? byId.get(state.preferredAccountId) : undefined
       if (selected && poolTypePriority && poolTypePriority.length > 0 && selected.poolType !== poolTypePriority[0]) selected = undefined
       if (!selected) {
