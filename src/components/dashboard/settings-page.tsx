@@ -15,13 +15,14 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useSession } from "./admin-context";
+import { PRESET_DOMAIN_SET, PROVIDER_DOMAIN_PRESETS, type DomainPreset } from "./domain-presets";
 import { ErrorState, PageIntro, Panel } from "./page-kit";
 import { useAdminResource } from "./use-admin-resource";
 import type { LogsCleanupResponse } from "./types";
 
 interface Settings {
-  githubMirrorUrl: string;
   domainMirrorMap: Record<string, string>;
   upstreamBaseUrl: string;
   upstreamRequestTimeoutMs: number;
@@ -164,75 +165,42 @@ export function SettingsPage() {
             description="Go API Key 调用的官方上游地址。"
           >
             <div className="grid gap-5 p-4 sm:p-5 lg:grid-cols-2">
-              <Field label="GitHub 镜像站地址" description="用于加速插件更新检查与下载。填镜像站根地址，如 https://githubfast.com；留空则直连 GitHub。">
-                <Input
-                  type="url"
-                  value={form.githubMirrorUrl}
-                  onChange={(e) => update("githubMirrorUrl", e.target.value)}
-                  placeholder="https://githubfast.com"
-                />
-              </Field>
+              <div className="lg:col-span-2">
               <Field label="域名镜像映射" description="全局域名级镜像配置。填写原始域名到镜像地址的映射，所有出站请求自动走镜像。留空则直连。">
+                <p className="font-mono text-xs text-muted-foreground">GitHub 镜像也在此配置：在下面的下拉里选 <span className="font-semibold">github.com</span>(GitHub 分组)，镜像地址填 <span className="font-semibold">https://githubfast.com</span> 之类的镜像站根地址。</p>
                 <div className="space-y-2">
-                  {(Object.entries(form.domainMirrorMap || {})).map(([domain, mirror], idx) => (
-                    <div key={idx} className="flex items-center gap-2">
-                      <Input
-                        className="flex-1 font-mono text-xs"
-                        value={domain}
-                        readOnly
-                        placeholder="chatgpt.com"
-                      />
-                      <span className="text-muted-foreground">→</span>
-                      <Input
-                        className="flex-1 font-mono text-xs"
-                        value={mirror}
-                        readOnly
-                        placeholder="https://your-mirror.com"
-                      />
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        type="button"
-                        onClick={() => {
-                          const next = { ...form.domainMirrorMap }
-                          delete next[domain]
-                          update("domainMirrorMap", next)
-                        }}
-                      >
-                        删除
-                      </Button>
-                    </div>
-                  ))}
-                  <div className="flex items-center gap-2">
-                    <Input
-                      id="mirror-domain-new"
-                      className="flex-1 font-mono text-xs"
-                      placeholder="chatgpt.com"
-                    />
-                    <span className="text-muted-foreground">→</span>
-                    <Input
-                      id="mirror-url-new"
-                      className="flex-1 font-mono text-xs"
-                      placeholder="https://your-mirror.com"
-                    />
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      type="button"
-                      onClick={() => {
-                        const d = (document.getElementById("mirror-domain-new") as HTMLInputElement)?.value?.trim()
-                        const m = (document.getElementById("mirror-url-new") as HTMLInputElement)?.value?.trim()
-                        if (!d || !m) return
-                        update("domainMirrorMap", { ...form.domainMirrorMap, [d.toLowerCase()]: m.replace(/\/$/, "") })
-                        ;(document.getElementById("mirror-domain-new") as HTMLInputElement).value = ""
-                        ;(document.getElementById("mirror-url-new") as HTMLInputElement).value = ""
+                  {Object.keys(form.domainMirrorMap ?? {}).length === 0 ? (
+                    <p className="font-mono text-xs text-muted-foreground">尚未配置任何域名镜像，出站请求将直连原始地址。</p>
+                  ) : null}
+                  {Object.entries(form.domainMirrorMap).map(([domain, mirror]) => (
+                    <DomainMirrorRow
+                      key={domain}
+                      domain={domain}
+                      mirror={mirror}
+                      onChange={(next) => {
+                        const map = { ...form.domainMirrorMap }
+                        if (next.domain !== domain) delete map[domain]
+                        map[next.domain.toLowerCase()] = next.mirror.replace(/\/$/, "")
+                        update("domainMirrorMap", map)
                       }}
-                    >
-                      添加
-                    </Button>
-                  </div>
+                      onDelete={() => {
+                        const next = { ...form.domainMirrorMap }
+                        delete next[domain]
+                        update("domainMirrorMap", next)
+                      }}
+                    />
+                  ))}
+                  <AddDomainMirrorRow
+                    onAdd={(domain, mirror) =>
+                      update("domainMirrorMap", {
+                        ...form.domainMirrorMap,
+                        [domain.toLowerCase()]: mirror.replace(/\/$/, ""),
+                      })
+                    }
+                  />
                 </div>
               </Field>
+              </div>
               <Field label="请求上游地址" description="Go API Key 调用的官方上游地址，仅支持 opencode.ai 官方 HTTPS 端点。">
                 <Input
                   type="url"
@@ -471,6 +439,165 @@ function Field({
       <Label>{label}</Label>
       {description ? <p className="text-xs leading-4 text-muted-foreground">{description}</p> : null}
       {children}
+    </div>
+  );
+}
+
+// A single configured domain-mirror entry. The "原始域名" field is a Select
+// dropdown offering known upstream hostnames grouped by provider, plus a
+// "自定义..." option that reveals a free-text input. The mirror target URL is
+// always an editable text field.
+function DomainMirrorRow({
+  domain,
+  mirror,
+  onChange,
+  onDelete,
+}: {
+  domain: string;
+  mirror: string;
+  onChange: (next: { domain: string; mirror: string }) => void;
+  onDelete: () => void;
+}) {
+  const isPreset = PRESET_DOMAIN_SET.has(domain);
+  const [customDomain, setCustomDomain] = useState(domain);
+  const [mirrorDraft, setMirrorDraft] = useState(mirror);
+  const selectValue = isPreset ? domain : "__custom__";
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-1 items-center gap-2">
+        <Select
+          value={selectValue}
+          onValueChange={(value) => {
+            if (value === "__custom__") {
+              setCustomDomain(domain);
+              onChange({ domain, mirror: mirrorDraft });
+            } else {
+              setCustomDomain(value);
+              onChange({ domain: value, mirror: mirrorDraft });
+            }
+          }}
+        >
+          <SelectTrigger size="sm" className="flex-1 font-mono text-xs">
+            <SelectValue placeholder="选择原始域名" />
+          </SelectTrigger>
+          <SelectContent>
+            {PROVIDER_DOMAIN_PRESETS.map((group) => (
+              <SelectGroup key={group.poolType}>
+                <SelectLabel>{group.label}</SelectLabel>
+                {group.domains.map((preset) => (
+                  <SelectItem key={preset.domain} value={preset.domain}>
+                    {preset.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            ))}
+            <SelectItem value="__custom__">自定义...</SelectItem>
+          </SelectContent>
+        </Select>
+        {selectValue === "__custom__" ? (
+          <Input
+            className="flex-1 font-mono text-xs"
+            value={customDomain}
+            onChange={(e) => {
+              setCustomDomain(e.target.value);
+            }}
+            onBlur={() => {
+              const trimmed = customDomain.trim().toLowerCase();
+              if (trimmed && trimmed !== domain) onChange({ domain: trimmed, mirror: mirrorDraft });
+            }}
+            placeholder="custom.example.com"
+          />
+        ) : null}
+      </div>
+      <span className="text-muted-foreground">→</span>
+      <Input
+        className="flex-1 font-mono text-xs"
+        value={mirrorDraft}
+        onChange={(e) => setMirrorDraft(e.target.value)}
+        onBlur={() => {
+          if (mirrorDraft !== mirror) onChange({ domain, mirror: mirrorDraft });
+        }}
+        placeholder="https://your-mirror.com"
+      />
+      <Button variant="outline" size="sm" type="button" onClick={onDelete}>
+        <Trash2 />
+      </Button>
+    </div>
+  );
+}
+
+// "Add new entry" row: a Select for the domain (presets grouped by provider,
+// or 自定义 with a free-text input) + a mirror URL input + an add button.
+function AddDomainMirrorRow({ onAdd }: { onAdd: (domain: string, mirror: string) => void }) {
+  const [domainMode, setDomainMode] = useState<"preset" | "custom">("preset");
+  const [presetDomain, setPresetDomain] = useState<string>("");
+  const [customDomain, setCustomDomain] = useState<string>("");
+  const [mirror, setMirror] = useState<string>("");
+  const domain = domainMode === "preset" ? presetDomain : customDomain.trim().toLowerCase();
+  const canAdd = domain.length > 0 && mirror.trim().length > 0;
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-t border-dashed pt-2">
+      <div className="flex flex-1 items-center gap-2">
+        <Select
+          value={domainMode === "preset" ? presetDomain : "__custom__"}
+          onValueChange={(value) => {
+            if (value === "__custom__") {
+              setDomainMode("custom");
+            } else {
+              setDomainMode("preset");
+              setPresetDomain(value);
+            }
+          }}
+        >
+          <SelectTrigger size="sm" className="flex-1 font-mono text-xs">
+            <SelectValue placeholder="选择原始域名" />
+          </SelectTrigger>
+          <SelectContent>
+            {PROVIDER_DOMAIN_PRESETS.map((group) => (
+              <SelectGroup key={group.poolType}>
+                <SelectLabel>{group.label}</SelectLabel>
+                {group.domains.map((preset: DomainPreset) => (
+                  <SelectItem key={preset.domain} value={preset.domain}>
+                    {preset.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            ))}
+            <SelectItem value="__custom__">自定义...</SelectItem>
+          </SelectContent>
+        </Select>
+        {domainMode === "custom" ? (
+          <Input
+            className="flex-1 font-mono text-xs"
+            value={customDomain}
+            onChange={(e) => setCustomDomain(e.target.value)}
+            placeholder="custom.example.com"
+          />
+        ) : null}
+      </div>
+      <span className="text-muted-foreground">→</span>
+      <Input
+        className="flex-1 font-mono text-xs"
+        value={mirror}
+        onChange={(e) => setMirror(e.target.value)}
+        placeholder="https://your-mirror.com"
+      />
+      <Button
+        variant="outline"
+        size="sm"
+        type="button"
+        disabled={!canAdd}
+        onClick={() => {
+          if (!canAdd) return;
+          onAdd(domain, mirror);
+          setPresetDomain("");
+          setCustomDomain("");
+          setMirror("");
+          setDomainMode("preset");
+        }}
+      >
+        添加
+      </Button>
     </div>
   );
 }

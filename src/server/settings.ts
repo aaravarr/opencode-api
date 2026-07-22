@@ -3,7 +3,6 @@ import { getDatabase, type AppDatabase } from "./db";
 import { SecretVault } from "./crypto";
 
 export const SYSTEM_SETTING_KEYS = {
-  githubMirrorUrl: "github_mirror_url",
   domainMirrorMap: "domain_mirror_map",
   upstreamBaseUrl: "opencode_upstream_base_url",
   upstreamRequestTimeoutMs: "upstream_request_timeout_ms",
@@ -35,7 +34,6 @@ export type SystemSecretKey =
   (typeof SYSTEM_SECRET_KEYS)[keyof typeof SYSTEM_SECRET_KEYS];
 
 export interface SystemSettings {
-  githubMirrorUrl: string;
   domainMirrorMap: Record<string, string>;
   upstreamBaseUrl: string;
   upstreamRequestTimeoutMs: number;
@@ -46,7 +44,6 @@ export interface SystemSettings {
 }
 
 export interface UpdateSystemSettingsInput {
-  githubMirrorUrl?: string;
   domainMirrorMap?: Record<string, string>;
   upstreamBaseUrl?: string;
   upstreamRequestTimeoutMs?: number;
@@ -70,7 +67,6 @@ export interface LogSettings {
 }
 
 const defaults: SystemSettings & LogSettings = {
-  githubMirrorUrl: "",
   domainMirrorMap: {},
   upstreamBaseUrl: "https://opencode.ai/zen/go/v1",
   upstreamRequestTimeoutMs: 120_000,
@@ -95,18 +91,12 @@ export function initializeSystemSettings(db: AppDatabase): void {
   );
  const vault = new SecretVault();
  db.transaction(() => {
-  insert.run(
-    SYSTEM_SETTING_KEYS.githubMirrorUrl,
-    JSON.stringify(defaults.githubMirrorUrl),
-    0,
-    now,
-  );
-    insert.run(
-      SYSTEM_SETTING_KEYS.domainMirrorMap,
-      JSON.stringify(defaults.domainMirrorMap),
-      0,
-      now,
-    );
+ insert.run(
+     SYSTEM_SETTING_KEYS.domainMirrorMap,
+     JSON.stringify(defaults.domainMirrorMap),
+     0,
+     now,
+   );
    insert.run(
      SYSTEM_SETTING_KEYS.upstreamBaseUrl,
      JSON.stringify(defaults.upstreamBaseUrl),
@@ -202,7 +192,6 @@ export function getSystemSettings(
   db: AppDatabase = getDatabase(),
 ): SystemSettings {
   return {
-    githubMirrorUrl: readPublic(db, SYSTEM_SETTING_KEYS.githubMirrorUrl, defaults.githubMirrorUrl),
     domainMirrorMap: readPublic(db, SYSTEM_SETTING_KEYS.domainMirrorMap, defaults.domainMirrorMap),
     upstreamBaseUrl: readPublic(
       db,
@@ -243,18 +232,6 @@ export function updateSystemSettings(
   db: AppDatabase = getDatabase(),
 ): SystemSettings {
   const entries: [string, string][] = [];
-  if (input.githubMirrorUrl !== undefined) {
-    const mirror = input.githubMirrorUrl.trim().replace(/\/$/, "");
-    if (mirror) {
-      try {
-        const url = new URL(mirror);
-        if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("protocol");
-      } catch {
-        throw new Error("GitHub 镜像站地址不是有效 URL");
-      }
-    }
-    entries.push([SYSTEM_SETTING_KEYS.githubMirrorUrl, JSON.stringify(mirror)]);
-  }
   if (input.domainMirrorMap !== undefined) {
     // Validate each entry: original domain → mirror URL
     const cleaned: Record<string, string> = {}

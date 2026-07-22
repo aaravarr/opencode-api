@@ -1,5 +1,5 @@
 import { fetch as undiciFetch, ProxyAgent, Agent } from "undici";
-import { getSystemSettings } from "@/server/settings";
+import { resolveMirrorUrl } from "@/server/api-fetch";
 
 export const runtime = "nodejs";
 // 路由级 ISR：5 分钟内复用同一份 GitHub 响应，避免每次请求都打 GitHub API。
@@ -15,29 +15,6 @@ interface GitHubRelease {
   html_url?: string;
   body?: string | null;
   assets?: Array<{ name: string; browser_download_url: string }>;
-}
-
-// 镜像站根地址（如 https://githubfast.com）：把 github.com 的下载与页面链接改写到这里，加速 release 下载。
-// 注意：镜像站通常只代理 github.com 主站，不代理 api.github.com，因此 API 请求仍直连。
-function mirrorBase(): string {
-  return getSystemSettings().githubMirrorUrl.trim().replace(/\/$/, "");
-}
-
-function rewriteGithubUrl(url: string): string {
-  const mirror = mirrorBase();
-  if (!mirror) return url;
-  try {
-    const parsed = new URL(url);
-    if (parsed.hostname === "github.com") {
-      const target = new URL(mirror);
-      parsed.protocol = target.protocol;
-      parsed.host = target.host;
-      return parsed.toString();
-    }
-  } catch {
-    // URL 解析失败则原样返回
-  }
-  return url;
 }
 
 // API 请求直连 api.github.com；部署环境如需系统代理，可通过 https_proxy/http_proxy 环境变量配置。
@@ -67,8 +44,9 @@ export async function GET(): Promise<Response> {
     const asset = data.assets?.find((a) => a.name === ASSET_NAME);
     return Response.json({
       version: version || null,
-      downloadUrl: rewriteGithubUrl(asset?.browser_download_url || FALLBACK_DOWNLOAD),
-      releaseUrl: rewriteGithubUrl(data.html_url || FALLBACK_RELEASE),
+      // 域名镜像映射里若配置了 github.com → 镜像站，则出站链接自动走镜像。
+      downloadUrl: resolveMirrorUrl(asset?.browser_download_url || FALLBACK_DOWNLOAD),
+      releaseUrl: resolveMirrorUrl(data.html_url || FALLBACK_RELEASE),
       notes: data.body || null,
       checkedAt: new Date().toISOString(),
     });
@@ -77,8 +55,8 @@ export async function GET(): Promise<Response> {
     // version 为 null 表示无法确定最新版本，调用方可据此引导手动查看。
     return Response.json({
       version: null,
-      downloadUrl: rewriteGithubUrl(FALLBACK_DOWNLOAD),
-      releaseUrl: rewriteGithubUrl(FALLBACK_RELEASE),
+      downloadUrl: resolveMirrorUrl(FALLBACK_DOWNLOAD),
+      releaseUrl: resolveMirrorUrl(FALLBACK_RELEASE),
       notes: null,
       checkedAt: new Date().toISOString(),
     });

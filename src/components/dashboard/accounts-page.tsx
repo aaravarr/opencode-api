@@ -15,11 +15,13 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
+import { FileUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
+import { useRef } from "react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -443,10 +445,64 @@ function Sub2ApiImportDialog({ open, onOpenChange, onCreated }: { open: boolean;
   const [jsonText, setJsonText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ imported: number; skipped: number; errors: string[] } | null>(null);
+  const [result, setResult] = useState<{ imported: number; skipped: number; accounts: { id: string; name: string; poolType: string }[]; errors: { name: string; message: string }[] } | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const [fileCount, setFileCount] = useState(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [detectedAccounts, setDetectedAccounts] = useState(0);
 
   function reset() {
-    setJsonText(""); setError(null); setResult(null);
+    setJsonText(""); setError(null); setResult(null); setFileCount(0); setDetectedAccounts(0);
+  }
+
+  // Merge a parsed Sub2API payload (or array) into whatever is currently in
+  // the textarea. The textarea stays the single source of truth so users can
+  // still hand-edit after dropping files; multiple files accumulate.
+  function mergeIntoTextarea(parsed: unknown, label: string) {
+    let incomingAccounts: unknown;
+    let incomingExtras: Record<string, unknown> = {};
+    if (Array.isArray(parsed)) {
+      incomingAccounts = parsed;
+    } else if (parsed && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).accounts)) {
+      const obj = parsed as Record<string, unknown>;
+      incomingAccounts = obj.accounts;
+      incomingExtras = { ...obj };
+      delete incomingExtras.accounts;
+    } else {
+      throw new Error(`${label}: JSON 顶层不是对象且不含 accounts 数组，也不是数组`);
+    }
+    let existing: Record<string, unknown> = {};
+    try {
+      const cur = jsonText.trim() ? JSON.parse(jsonText) : null;
+      if (cur && typeof cur === "object" && !Array.isArray(cur) && Array.isArray((cur as Record<string, unknown>).accounts)) {
+        existing = { ...(cur as Record<string, unknown>) };
+      }
+    } catch { /* current textarea not valid JSON — start fresh */ }
+    const mergedAccounts = [...((existing.accounts as unknown[]) ?? []), ...(incomingAccounts as unknown[])];
+    const merged = { ...existing, ...incomingExtras, accounts: mergedAccounts };
+    setJsonText(JSON.stringify(merged, null, 2));
+    setDetectedAccounts(mergedAccounts.length);
+  }
+
+  async function handleFiles(files: FileList | File[]) {
+    setError(null);
+    const list = Array.from(files).filter((f) => f.type === "application/json" || f.name.toLowerCase().endsWith(".json") || f.type === "");
+    if (!list.length) { setError("请选择 .json 文件"); return; }
+    let ok = 0;
+    let firstErr: string | null = null;
+    for (const file of list) {
+      try {
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        mergeIntoTextarea(parsed, file.name);
+        ok++;
+      } catch (cause) {
+        const msg = cause instanceof Error ? cause.message : "解析失败";
+        if (!firstErr) firstErr = `${file.name}: ${msg}`;
+      }
+    }
+    setFileCount((c) => c + ok);
+    if (firstErr) setError(firstErr);
   }
 
   async function handleSubmit() {
@@ -465,7 +521,12 @@ function Sub2ApiImportDialog({ open, onOpenChange, onCreated }: { open: boolean;
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) throw new Error(payload?.error?.message || payload?.message || "导入账号失败");
-      setResult({ imported: payload?.imported ?? 0, skipped: payload?.skipped ?? 0, errors: payload?.errors ?? [] });
+      setResult({
+        imported: payload?.imported ?? 0,
+        skipped: payload?.skipped ?? 0,
+        accounts: payload?.accounts ?? [],
+        errors: payload?.errors ?? [],
+      });
       if (!(payload?.errors?.length)) { setJsonText(""); }
       onCreated();
     } catch (cause) {
@@ -479,10 +540,55 @@ function Sub2ApiImportDialog({ open, onOpenChange, onCreated }: { open: boolean;
     <Dialog open={open} onOpenChange={(next) => { if (!next) reset(); onOpenChange(next); }}>
       <DialogContent className="max-h-[85dvh] gap-0 overflow-hidden p-0 sm:max-w-lg">
         <DialogHeader className="border-b px-5 py-4">
-          <DialogTitle>导入 Sub2API JSON</DialogTitle>
-          <DialogDescription>粘贴 Sub2API 导出的 JSON，自动识别 platform=openai 的账号并导入。</DialogDescription>
-        </DialogHeader>
+        <DialogTitle>导入 Sub2API JSON</DialogTitle>
+        <DialogDescription>粘贴 Sub2API 导出的 JSON，自动识别 platform=openai 的账号并导入。</DialogDescription>
+      </DialogHeader>
         <div className="max-h-[calc(85dvh-160px)] space-y-4 overflow-y-auto px-5 py-6">
+          {/* 拖拽 / 选择 / 粘贴文件区域 */}
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => fileInputRef.current?.click()}
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              if (e.dataTransfer.files?.length) void handleFiles(e.dataTransfer.files);
+            }}
+            onPaste={(e) => {
+              const items = e.clipboardData?.items;
+              if (!items) return;
+              const files: File[] = [];
+              for (const item of items) {
+                if (item.kind === "file") {
+                  const f = item.getAsFile();
+                  if (f) files.push(f);
+                }
+              }
+              if (files.length) { e.preventDefault(); void handleFiles(files); }
+            }}
+            className={`flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed px-4 py-7 text-center transition-colors ${dragOver ? "border-primary bg-primary/5" : "border-border bg-[#fafafa] hover:bg-[#f4f4f4]"}`}
+          >
+            <FileUp className="size-7 text-muted-foreground" />
+            <div className="text-sm font-medium">
+              {dragOver ? "松开即可导入文件" : "拖拽 JSON 文件到此处，或点击选择"}
+            </div>
+            <div className="text-[11px] text-muted-foreground">支持 .json 文件，可多选；可直接粘贴文件</div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json,application/json"
+              multiple
+              className="hidden"
+              onChange={(e) => { if (e.target.files?.length) void handleFiles(e.target.files); e.currentTarget.value = ""; }}
+            />
+          </div>
+          {fileCount > 0 || detectedAccounts > 0 ? (
+            <div className="rounded-md border bg-[#fafafa] px-3.5 py-2 text-xs text-muted-foreground">
+              已载入 {fileCount} 个文件，检测到 <span className="font-medium text-foreground">{detectedAccounts}</span> 个账号
+            </div>
+          ) : null}
           <Textarea
             value={jsonText}
             onChange={(e) => setJsonText(e.target.value)}
@@ -491,7 +597,7 @@ function Sub2ApiImportDialog({ open, onOpenChange, onCreated }: { open: boolean;
             spellCheck={false}
           />
           <p className="text-[11px] leading-4 text-muted-foreground">
-            支持粘贴 Sub2API 导出的完整 JSON。系统会自动识别 platform=openai 的账号并批量导入，其余账号将被跳过。
+            也可以直接粘贴 Sub2API 导出的完整 JSON。系统会自动识别 platform=openai 的账号并批量导入，其余账号将被跳过。支持一次导入多个账号。
           </p>
           {error ? <div className="rounded-md border border-destructive/20 bg-destructive/5 px-3.5 py-2.5 text-xs text-destructive" role="alert">{error}</div> : null}
           {result ? (
@@ -499,10 +605,20 @@ function Sub2ApiImportDialog({ open, onOpenChange, onCreated }: { open: boolean;
               <p className="font-medium text-emerald-600">成功导入 {result.imported} 个账号，跳过 {result.skipped} 个。</p>
               {result.errors.length ? (
                 <ul className="space-y-1 text-destructive">
-                  {result.errors.map((msg, i) => (
-                    <li key={i} className="break-all">{msg}</li>
+                  {result.errors.map((err, i) => (
+                    <li key={i} className="break-all"><span className="font-medium">{err.name}</span>：{err.message}</li>
                   ))}
                 </ul>
+              ) : null}
+              {result.accounts.length ? (
+                <details className="pt-1">
+                  <summary className="cursor-pointer text-muted-foreground">已导入账号（{result.accounts.length}）</summary>
+                  <ul className="mt-1 space-y-0.5 text-muted-foreground">
+                    {result.accounts.map((a) => (
+                      <li key={a.id}>{a.name} · {a.poolType}</li>
+                    ))}
+                  </ul>
+                </details>
               ) : null}
             </div>
           ) : null}

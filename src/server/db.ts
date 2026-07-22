@@ -85,7 +85,6 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 CREATE INDEX IF NOT EXISTS accounts_owner_idx ON accounts(owner_user_id, ordinal, created_at);
 CREATE INDEX IF NOT EXISTS accounts_usage_idx ON accounts(next_usage_check_at, admin_state, auth_state);
-CREATE INDEX IF NOT EXISTS accounts_pool_type_idx ON accounts(owner_user_id, pool_type, admin_state);
 
 CREATE TABLE IF NOT EXISTS quota_windows (
   owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -235,6 +234,7 @@ export function createDatabase(filename: string): AppDatabase {
   db.exec(schema)
   ensureCurrentAccountColumns(db)
   ensurePoolTypeColumn(db)
+  db.exec("CREATE INDEX IF NOT EXISTS accounts_pool_type_idx ON accounts(owner_user_id, pool_type, admin_state)")
   ensureCurrentGatewayRequestColumns(db)
   ensureCurrentApiKeyColumns(db)
   ensureUserColumns(db)
