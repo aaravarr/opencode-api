@@ -3,7 +3,9 @@ import type { AppDatabase } from "./db"
 import { getDatabase } from "./db"
 import { AccountRepository } from "./repository"
 import { getSystemSettings, normalizeOfficialOpenCodeUpstreamUrl } from "./settings"
-import type { QuotaKind, RouteSelection } from "./types"
+import type { AccountRecord, PoolType, QuotaKind, RouteSelection } from "./types"
+import { tryGetProvider, getProvider } from "./providers"
+import { ModelRoutingRepository } from "./repository"
 
 type Row = Record<string, unknown>
 const nowIso = () => new Date().toISOString()
@@ -15,6 +17,8 @@ export class NoEligibleAccountError extends Error {
 }
 
 function isAccountReady(account: ReturnType<AccountRepository["list"]>[number]): boolean {
+  const provider = tryGetProvider(account.poolType)
+  if (provider) return provider.isAccountReady(account)
   return account.adminState === "ENABLED"
     && account.authState === "VALID"
     && account.subscriptionState === "ACTIVE"
@@ -24,10 +28,13 @@ function isAccountReady(account: ReturnType<AccountRepository["list"]>[number]):
 
 export class RoutingService {
   private readonly accounts: AccountRepository
+  private readonly modelRouting: ModelRoutingRepository
+  private currentModel: string | null = null
 
   constructor(readonly ownerUserId: string, readonly db: AppDatabase = getDatabase()) {
     if (!ownerUserId) throw new Error("ownerUserId is required")
     this.accounts = new AccountRepository(ownerUserId, db)
+    this.modelRouting = new ModelRoutingRepository(ownerUserId, db)
   }
 
   getState() {
@@ -39,6 +46,22 @@ export class RoutingService {
       cursorVersion: Number(row.cursor_version),
       updatedAt: String(row.updated_at),
     }
+  }
+
+  getPoolPreferences(): Record<string, string | null> {
+    const rows = this.db.prepare("SELECT pool_type, preferred_account_id FROM pool_preferences WHERE owner_user_id = ?").all(this.ownerUserId) as { pool_type: string; preferred_account_id: string | null }[]
+    const result: Record<string, string | null> = {}
+    for (const row of rows) result[row.pool_type] = row.preferred_account_id
+    return result
+  }
+
+  setPoolPreference(poolType: PoolType, accountId: string | null): void {
+    const timestamp = nowIso()
+    if (accountId && !this.accounts.get(accountId)) throw new Error("Account not found")
+    this.db.prepare(`INSERT INTO pool_preferences(owner_user_id, pool_type, preferred_account_id, updated_at) VALUES(?,?,?,?)
+      ON CONFLICT(owner_user_id, pool_type) DO UPDATE SET preferred_account_id=excluded.preferred_account_id, updated_at=excluded.updated_at`)
+      .run(this.ownerUserId, poolType, accountId, timestamp)
+    this.event("POOL_PREFERENCE_CHANGED", "INFO", accountId, null, { poolType, preferredAccountId: accountId })
   }
 
   setPreferred(accountId: string | null) {
@@ -57,6 +80,7 @@ export class RoutingService {
       const timestamp = now.toISOString()
       this.db.prepare("DELETE FROM route_leases WHERE owner_user_id = ? AND (completed_at IS NOT NULL OR expires_at <= ?)").run(this.ownerUserId, timestamp)
       const state = this.getState()
+      const poolPrefs = this.getPoolPreferences()
       const all = this.accounts.list()
       const activeBlocks = this.db.prepare(`SELECT account_id, reset_at FROM quota_windows
         WHERE owner_user_id = ? AND usage_percent >= 100 AND (reset_at IS NULL OR reset_at > ?)`)
@@ -89,11 +113,41 @@ export class RoutingService {
         throw new NoEligibleAccountError("NO_ELIGIBLE")
       }
 
+      // Model routing: determine pool type priority from routing rules.
+      const poolTypePriority = this.currentModel ? this.modelRouting.resolveModelPriority(this.currentModel) : null
+      let orderedEligible = eligible
+      if (poolTypePriority && poolTypePriority.length > 0) {
+        const poolTypeOrder = new Map<string, number>()
+        poolTypePriority.forEach((pt, idx) => poolTypeOrder.set(pt, idx))
+        orderedEligible = [...eligible].sort((a, b) => {
+          const aIdx = poolTypeOrder.get(a.poolType) ?? Number.MAX_SAFE_INTEGER
+          const bIdx = poolTypeOrder.get(b.poolType) ?? Number.MAX_SAFE_INTEGER
+          if (aIdx !== bIdx) return aIdx - bIdx
+          return a.ordinal - b.ordinal
+        })
+      }
+
       const byId = new Map(eligible.map((account) => [account.id, account]))
+      const ordered = poolTypePriority && poolTypePriority.length > 0
+        ? orderedEligible
+        : [...eligible].sort((a, b) => a.ordinal - b.ordinal)
       let selected = state.preferredAccountId ? byId.get(state.preferredAccountId) : undefined
-      selected ??= state.currentAccountId ? byId.get(state.currentAccountId) : undefined
+      if (selected && poolTypePriority && poolTypePriority.length > 0 && selected.poolType !== poolTypePriority[0]) selected = undefined
       if (!selected) {
-        const ordered = [...eligible].sort((a, b) => a.ordinal - b.ordinal)
+        selected = state.currentAccountId ? byId.get(state.currentAccountId) : undefined
+        if (selected && poolTypePriority && poolTypePriority.length > 0 && selected.poolType !== poolTypePriority[0]) selected = undefined
+      }
+      // Per-pool-type preferred account
+      if (!selected && poolTypePriority && poolTypePriority.length > 0) {
+        const poolPref = poolPrefs[poolTypePriority[0] as PoolType]
+        if (poolPref) selected = byId.get(poolPref)
+      }
+      if (!selected) {
+        for (const prefId of Object.values(poolPrefs)) {
+          if (prefId && byId.has(prefId)) { selected = byId.get(prefId); break }
+        }
+      }
+      if (!selected) {
         const anchor = all.find((account) => account.id === (state.currentAccountId ?? state.preferredAccountId))?.ordinal ?? -1
         selected = ordered.find((account) => account.ordinal > anchor) ?? ordered[0]
       }
@@ -112,6 +166,8 @@ export class RoutingService {
       return { account: selected, leaseId, target: { baseUrl: normalizeOfficialOpenCodeUpstreamUrl(settings.upstreamBaseUrl), authStyle: "BEARER" as const } }
     })()
   }
+
+  setModel(model: string | null): void { this.currentModel = model }
 
   releaseLease(leaseId: string): void {
     this.db.prepare("UPDATE route_leases SET completed_at=? WHERE id=? AND owner_user_id=? AND completed_at IS NULL")
@@ -149,5 +205,26 @@ export class RoutingService {
   event(type: string, severity: "INFO" | "WARN" | "ERROR", accountId: string | null, requestId: string | null, metadata: unknown): void {
     this.db.prepare("INSERT INTO events(id,owner_user_id,type,severity,account_id,request_id,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?)")
       .run(randomUUID(), this.ownerUserId, type, severity, accountId, requestId, JSON.stringify(metadata ?? {}), nowIso())
+  }
+
+  getPoolTypeStats(): Record<string, { total: number; ready: number; blocked: number; inactive: number }> {
+    const all = this.accounts.list()
+    const stats: Record<string, { total: number; ready: number; blocked: number; inactive: number }> = {}
+    const timestamp = nowIso()
+    const blockedRows = this.db.prepare(`SELECT DISTINCT account_id FROM quota_windows
+      WHERE owner_user_id = ? AND usage_percent >= 100 AND (reset_at IS NULL OR reset_at > ?)`).all(this.ownerUserId, timestamp) as { account_id: string }[]
+    const blockedSet = new Set(blockedRows.map((r) => r.account_id))
+    for (const account of all) {
+      const pt = account.poolType
+      if (!stats[pt]) stats[pt] = { total: 0, ready: 0, blocked: 0, inactive: 0 }
+      stats[pt].total++
+      if (isAccountReady(account)) {
+        if (blockedSet.has(account.id)) stats[pt].blocked++
+        else stats[pt].ready++
+      } else {
+        stats[pt].inactive++
+      }
+    }
+    return stats
   }
 }

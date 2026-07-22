@@ -2,6 +2,41 @@ import { Badge } from "@/components/ui/badge";
 import type { Account, QuotaWindow } from "./types";
 import { formatDate, formatDuration } from "./page-kit";
 
+export const POOL_TYPE_META: Record<string, { label: string; description: string; quotaKinds: string[] }> = {
+  "opencode-go": { label: "OpenCode Go", description: "Google 登录 + Go API Key", quotaKinds: ["fiveHour", "weekly", "monthly"] },
+  "openai-cpa": { label: "OpenAI CPA", description: "ChatGPT Access Token", quotaKinds: ["fiveHour", "weekly"] },
+  "openai-oauth": { label: "OpenAI OAuth", description: "OAuth 授权", quotaKinds: ["fiveHour", "weekly"] },
+};
+
+export function getPoolLabel(poolType?: string | null) {
+  return POOL_TYPE_META[poolType || "opencode-go"]?.label ?? poolType ?? "OpenCode Go";
+}
+
+export function getPoolQuotaKinds(poolType?: string | null) {
+  return POOL_TYPE_META[poolType || "opencode-go"]?.quotaKinds ?? ["fiveHour", "weekly", "monthly"];
+}
+
+export function PoolTypeBadge({ poolType }: { poolType?: string | null }) {
+  const type = poolType || "opencode-go";
+  const meta = POOL_TYPE_META[type];
+  const isCpa = type === "openai-cpa";
+  const isOauth = type === "openai-oauth";
+  return (
+    <Badge
+      variant="outline"
+      className={`h-5 rounded-sm px-1.5 text-[11px] font-medium ${
+        isCpa
+          ? "border-violet/20 bg-violet-soft text-violet-deep"
+          : isOauth
+            ? "border-cyan/30 bg-cyan-soft text-cyan-deep"
+            : "border-info/20 bg-info-soft text-info"
+      }`}
+    >
+      {meta?.label ?? type}
+    </Badge>
+  );
+}
+
 const statusLabels: Record<string, string> = {
   active: "可用",
   available: "可用",

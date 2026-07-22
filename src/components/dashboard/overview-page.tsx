@@ -48,6 +48,16 @@ export function OverviewPage() {
             <Metric icon={ShieldAlert} label="不可用" value={data?.counts?.inactiveAccounts ?? data?.stats?.unavailableAccounts} note="订阅、认证或已停用" />
           </section>
 
+          {data?.counts?.byPoolType ? (
+            <Panel title="按号池类型统计" description="每种号池的账号健康度分布。">
+              <div className="grid gap-px bg-border sm:grid-cols-2 xl:grid-cols-3">
+                {Object.entries(data.counts.byPoolType).map(([poolType, counts]) => (
+                  <PoolTypeStatCard key={poolType} poolType={poolType} counts={counts} />
+                ))}
+              </div>
+            </Panel>
+          ) : null}
+
           <Panel title="24 小时 Token 趋势" description="堆叠柱图展示 Token 分段，折线展示请求数。">
             {usageResource.loading ? <LoadingTable rows={3} columns={6} /> : usageResource.error ? (
               <ErrorState message={usageResource.error} onRetry={() => void usageResource.refresh()} />
@@ -131,6 +141,33 @@ function Metric({ icon: Icon, label, value, note, tone }: { icon: typeof UsersRo
       </div>
       <p className="tabular mt-3 text-2xl font-semibold tracking-[-0.04em]">{value ?? "未知"}</p>
       <p className="mt-1 text-[11px] text-muted-foreground">{note}</p>
+    </div>
+  );
+}
+
+function PoolTypeStatCard({ poolType, counts }: { poolType: string; counts: { total: number; ready: number; blocked: number; inactive: number } }) {
+  const labels: Record<string, string> = { "opencode-go": "OpenCode Go", "openai-cpa": "OpenAI CPA", "openai-oauth": "OpenAI OAuth" };
+  const label = labels[poolType] ?? poolType;
+  return (
+    <div className="space-y-3 bg-white p-4">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-medium text-foreground">{label}</p>
+        <span className="tabular text-lg font-semibold tracking-[-0.04em]">{counts.total}</span>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <div className="rounded-md bg-success-soft/50 px-2 py-1.5">
+          <p className="text-[10px] text-muted-foreground">就绪</p>
+          <p className="tabular mt-0.5 text-sm font-semibold text-success">{counts.ready}</p>
+        </div>
+        <div className="rounded-md bg-warning-soft/50 px-2 py-1.5">
+          <p className="text-[10px] text-muted-foreground">封禁</p>
+          <p className="tabular mt-0.5 text-sm font-semibold text-warning">{counts.blocked}</p>
+        </div>
+        <div className="rounded-md bg-destructive/5 px-2 py-1.5">
+          <p className="text-[10px] text-muted-foreground">失活</p>
+          <p className="tabular mt-0.5 text-sm font-semibold text-destructive">{counts.inactive}</p>
+        </div>
+      </div>
     </div>
   );
 }

@@ -4,6 +4,9 @@ export const SUBSCRIPTION_STATES = ["ACTIVE", "INACTIVE", "VERIFY_ERROR"] as con
 export const BILLING_GUARDS = ["VERIFIED_GO_ONLY", "PAYG_FALLBACK_ENABLED", "UNVERIFIED"] as const
 export const QUOTA_KINDS = ["FIVE_HOUR", "WEEKLY", "MONTHLY", "UNKNOWN_GO_LIMIT"] as const
 
+export const POOL_TYPES = ["opencode-go", "openai-cpa", "openai-oauth"] as const
+export type PoolType = (typeof POOL_TYPES)[number]
+
 export type AdminState = (typeof ADMIN_STATES)[number]
 export type AuthState = (typeof AUTH_STATES)[number]
 export type SubscriptionState = (typeof SUBSCRIPTION_STATES)[number]
@@ -27,6 +30,7 @@ export interface AccountRecord {
   id: string
   ownerUserId: string
   name: string
+  poolType: PoolType
   workspaceId: string
   email: string | null
   goKeyId: string
@@ -58,6 +62,29 @@ export interface AccountRecord {
 export interface AccountCredential extends AccountRecord {
   authCookie: string
   goApiKey: string
+}
+
+export interface ProviderAccountData {
+  // Generic encrypted credential storage for non-OpenCode providers
+  // For openai-cpa (AT token): { token, chatgptAccountId, planType }
+  // For openai-oauth (refreshable): { token, refreshToken, expiresAt, clientId, chatgptAccountId, planType }
+  token?: string
+  refreshToken?: string
+  expiresAt?: string
+  clientId?: string
+  chatgptAccountId?: string
+  planType?: string
+  extraHeaders?: Record<string, string>
+}
+
+export interface ModelRouteRule {
+  id: string
+  ownerUserId: string
+  modelPattern: string
+  poolTypePriority: string[]
+  enabled: boolean
+  createdAt: string
+  updatedAt: string
 }
 
 export interface UpstreamTarget {

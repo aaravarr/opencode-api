@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   id TEXT PRIMARY KEY,
   owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
+  pool_type TEXT NOT NULL DEFAULT 'opencode-go',
   workspace_id TEXT NOT NULL UNIQUE,
   email TEXT,
   admin_state TEXT NOT NULL DEFAULT 'ENABLED',
@@ -84,6 +85,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 CREATE INDEX IF NOT EXISTS accounts_owner_idx ON accounts(owner_user_id, ordinal, created_at);
 CREATE INDEX IF NOT EXISTS accounts_usage_idx ON accounts(next_usage_check_at, admin_state, auth_state);
+CREATE INDEX IF NOT EXISTS accounts_pool_type_idx ON accounts(owner_user_id, pool_type, admin_state);
 
 CREATE TABLE IF NOT EXISTS quota_windows (
   owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -185,6 +187,14 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_owner_created_idx ON events(owner_user_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS pool_preferences (
+  owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  pool_type TEXT NOT NULL,
+  preferred_account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(owner_user_id, pool_type)
+);
+
 CREATE TABLE IF NOT EXISTS system_settings (
   key TEXT PRIMARY KEY,
   value_json TEXT NOT NULL,
@@ -192,6 +202,30 @@ CREATE TABLE IF NOT EXISTS system_settings (
   updated_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS provider_credentials (
+  id TEXT PRIMARY KEY,
+  owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  pool_type TEXT NOT NULL,
+  credential_data_ciphertext TEXT NOT NULL,
+  credential_version INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(account_id)
+);
+CREATE INDEX IF NOT EXISTS provider_credentials_owner_idx ON provider_credentials(owner_user_id);
+
+CREATE TABLE IF NOT EXISTS model_routing (
+  id TEXT PRIMARY KEY,
+  owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  model_pattern TEXT NOT NULL,
+  pool_type_priority TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS model_routing_owner_idx ON model_routing(owner_user_id, enabled);
 `
 
 export function createDatabase(filename: string): AppDatabase {
@@ -200,10 +234,16 @@ export function createDatabase(filename: string): AppDatabase {
   resetLegacyAccountDomain(db)
   db.exec(schema)
   ensureCurrentAccountColumns(db)
+  ensurePoolTypeColumn(db)
   ensureCurrentGatewayRequestColumns(db)
   ensureCurrentApiKeyColumns(db)
   ensureUserColumns(db)
   return db
+}
+
+function ensurePoolTypeColumn(db: AppDatabase): void {
+  const cols = new Set((db.prepare("PRAGMA table_info(accounts)").all() as { name: string }[]).map((column) => column.name))
+  if (!cols.has("pool_type")) db.exec("ALTER TABLE accounts ADD COLUMN pool_type TEXT NOT NULL DEFAULT 'opencode-go'")
 }
 
 function ensureCurrentAccountColumns(db: AppDatabase): void {
@@ -284,7 +324,7 @@ function resetLegacyAccountDomain(db: AppDatabase): void {
   }
 }
 
-const CURRENT_ACCOUNT_SCHEMA_VERSION = 3
+const CURRENT_ACCOUNT_SCHEMA_VERSION = 5
 const globalDatabase = globalThis as typeof globalThis & {
   __opencodeApiDb?: AppDatabase
   __opencodeApiAccountSchemaVersion?: number
@@ -302,6 +342,7 @@ export function getDatabase(): AppDatabase {
   // connection on the previous table shape.
   if (globalDatabase.__opencodeApiAccountSchemaVersion !== CURRENT_ACCOUNT_SCHEMA_VERSION) {
     ensureCurrentAccountColumns(globalDatabase.__opencodeApiDb)
+    ensurePoolTypeColumn(globalDatabase.__opencodeApiDb)
     ensureCurrentGatewayRequestColumns(globalDatabase.__opencodeApiDb)
     globalDatabase.__opencodeApiAccountSchemaVersion = CURRENT_ACCOUNT_SCHEMA_VERSION
   }

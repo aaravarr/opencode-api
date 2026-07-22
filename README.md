@@ -1,29 +1,52 @@
-# OpenCode to API
+# Opencode API
 
-面向 OpenCode Go 订阅账号的多用户统一网关。每个用户通过浏览器插件连接自己的 `opencode.ai` Console 会话，后端自动复用或创建专用 Go API Key，并只在该用户自己的账号池中智能路由。
+多 Provider 号池网关，统一管理多种 AI 订阅账号，对外暴露 OpenAI 兼容 API。
 
 ## 能力
 
-- 首次启动初始化管理员；支持 `ADMIN` / `USER` 两种角色
-- 用户、账号、统一 API Key、路由状态、额度、请求和事件严格隔离
-- Chrome / Edge MV3 插件，仅支持 Google 登录
-- 自动读取 `auth` Console Cookie 与 `workspaceId`，不收集 Google 密码
-- 自动维护名称为 `OpenCode to API` 的 Go API Key
-- 从 Go Console SSR 页面读取 5 小时、周、月使用百分比和恢复时间
-- 通过订阅文案或 `liteSubscriptionID` 自动识别 Go 订阅，并读取 `Use balance`；不需要用户手工确认
-- Go 额度耗尽时在内部切换账号；其他上游错误直接返回
-- 支持用户设置优先账号，额度不足时继续自动轮询
-- 只刷新当前、优先或最近使用的账号，避免高频检查闲置账号
-- Console 会话失效后标记为需要重新登录，插件重新登录即可覆盖更新
+- **多 Provider 号池**：OpenCode Go（浏览器扩展接入）、OpenAI CPA（at- token 直接验证）、OpenAI OAuth（refresh token 自动刷新）
+- **Sub2API JSON 导入**：粘贴 Sub2API 导出的账号 JSON 批量导入，自动识别 platform 和凭证类型
+- **per-pool-type 首选账号**：每种号池类型独立配置第一候选，调度时优先走该号池的偏好账号
+- **模型路由优先级**：按模型 pattern 配置号池优先级（如 gpt-5* 优先走 openai-cpa），支持通配符和批量配置
+- **/models 聚合**：自动聚合所有活跃 provider 的可用模型列表
+- **统一域名镜像**：全局域名级镜像映射表，所有出站请求透明走镜像，调用侧无感知
+- **额度管理**：5h / weekly / monthly 窗口，从上游 API 响应头被动采集 + 主动查询
+- 用户、账号、API Key、路由状态、额度、请求日志严格按用户隔离
 
-## 凭据模型
+## 架构
 
-系统保存两类彼此独立的凭据：
+### Provider 接口
 
-1. `authCookie`：仅用于访问 `opencode.ai/workspace/{id}/go`、Keys 页面和创建 Go Key。
-2. Go API Key：仅用于 `https://opencode.ai/zen/go/v1/*` 模型请求。
+每种号池类型实现统一的 Provider 接口（src/server/providers/types.ts），定义了额度管理、凭证获取、模型列表、上游转发、错误分类和账号就绪判断。调度策略基于接口而非具体实现，新增 provider 只需实现接口并注册。
 
-两者均使用本机随机生成的主密钥进行 AES-256-GCM 加密。数据库不会保存 Google token、CLI OAuth token 或 refresh token。
+### Pool Types
+
+| Pool Type | 接入方式 | 额度窗口 | 上游 |
+|-----------|---------|---------|------|
+| opencode-go | 浏览器扩展（auth cookie -> goApiKey） | 5h + weekly + monthly | opencode.ai/zen/go/v1 |
+| openai-cpa | Sub2API JSON 导入（at- token，无刷新） | 5h + weekly | chatgpt.com/backend-api/codex |
+| openai-oauth | Sub2API JSON 导入（OAuth + refresh token） | 5h + weekly | chatgpt.com/backend-api/codex |
+
+### 调度逻辑
+
+1. 请求携带 model -> 查 model_routing 表确定 pool type 优先级
+2. 按优先级在对应 pool type 的就绪账号中选择
+3. 每个 pool type 有独立的首选账号（pool_preferences 表）
+4. 账号额度耗尽 -> 切换同 pool 内下一个账号 -> 该 pool 全部耗尽 -> 切换下一个 pool type
+5. 所有 pool type 耗尽 -> 返回 429
+
+### 域名镜像
+
+系统设置中的 domain_mirror_map 是一个 { 原始域名: 镜像地址 } 映射表。所有出站 HTTP 请求经过 apiFetch 拦截器，自动将匹配域名的请求重定向到镜像地址。例如：
+
+```json
+{
+  "chatgpt.com": "https://your-chatgpt-mirror.com",
+  "auth.openai.com": "https://your-auth-mirror.com"
+}
+```
+
+配置后，Codex API 转发、额度查询、whoami 验证、token 刷新全部透明走镜像，调用侧代码无需任何改动。
 
 ## 启动
 
@@ -32,7 +55,7 @@ npm install
 npm run dev
 ```
 
-打开 `http://127.0.0.1:3000`。首次启动会进入管理员初始化页面，密码最少 6 位。
+首次启动进入管理员初始化页面，密码最少 6 位。
 
 生产构建：
 
@@ -41,57 +64,73 @@ npm run build
 npm start
 ```
 
-也可以使用 Docker：
+Docker：
 
 ```bash
-docker build -t opencode-to-api .
-docker run --rm -p 3000:3000 -v opencode-data:/data opencode-to-api
+docker build -t opencode-api .
+docker run --rm -p 3000:3000 -v opencode-data:/data opencode-api
 ```
 
-默认情况下无需编辑 `.env`。系统设置与随机安全密钥会在首次启动时保存到数据目录；只有需要改变持久化目录时才设置：
+## 连接账号
 
-```env
-DATA_DIR=/data
+### OpenCode Go 账号（浏览器扩展）
+
+1. 在管理后台创建 API Key
+2. 安装 browser-extension/ 目录的 Chrome/Edge MV3 扩展
+3. 在插件中配置后端地址和 API Key
+4. Google 登录后自动上报 auth cookie + workspaceId
+5. 后端自动创建 Go API Key、读取订阅和额度
+
+### OpenAI CPA / OAuth 账号（Sub2API JSON 导入）
+
+1. 在 Sub2API 管理后台导出账号 JSON
+2. 在本项目的「账号池」页面点击「导入 Sub2API JSON」
+3. 粘贴导出的完整 JSON
+4. 系统自动识别 platform=openai 的账号，根据 auth_mode 和 refresh_token 归类为 openai-cpa 或 openai-oauth
+5. 带有 refresh_token 的账号会自动刷新 access_token
+
+导入 JSON 格式示例：
+
+```json
+{
+  "type": "sub2api-data",
+  "version": 1,
+  "exported_at": "2026-07-22T12:00:00Z",
+  "proxies": [],
+  "accounts": [
+    {
+      "name": "我的账号",
+      "platform": "openai",
+      "type": "oauth",
+      "credentials": {
+        "access_token": "at-xxxxxxxx",
+        "auth_mode": "personalAccessToken",
+        "plan_type": "plus",
+        "chatgpt_account_id": "acc_xxx"
+      },
+      "concurrency": 3,
+      "priority": 50
+    }
+  ]
+}
 ```
 
-## 连接 OpenCode Go 账号
+### 模型路由优先级
 
-### 1. 创建当前用户的统一 API Key
+在「智能路由」页面配置模型路由规则：
+- 输入模型 pattern（如 gpt-5* 或 claude-sonnet-4-5），支持通配符
+- 选择该模型优先走的 pool type 排序
+- 支持批量输入多个 pattern 共享同一优先级配置
+- 精确匹配优先于通配符前缀匹配
 
-登录管理页面，进入“API 密钥”，创建一个 Key。这个 Key既用于调用统一模型入口，也用于验证浏览器插件上报的账号归属。
+### 号池首选账号
 
-### 2. 安装浏览器插件
-
-1. 打开 `chrome://extensions` 或 `edge://extensions`。
-2. 开启开发者模式。
-3. 点击“加载已解压的扩展程序”。
-4. 选择项目中的 `browser-extension` 目录。
-5. 在插件中配置后端地址和第一步创建的 API Key。
-
-### 3. Google 登录
-
-点击插件的“使用 Google 登录”。插件会：
-
-1. 打开 `opencode.ai/auth/authorize`。
-2. 在 `auth.opencode.ai` 自动选择 Google。
-3. 等待用户完成 Google 登录和 OpenCode 授权确认。
-4. 进入 workspace 后读取 `auth` Cookie 与 `workspaceId`。
-5. 自动调用 `POST /api/plugin/accounts` 上报。
-
-后端随后读取订阅、额度与 Keys 页面。Go 订阅由 “You are subscribed to OpenCode Go” 文案或非空 `liteSubscriptionID` 自动确认。如果当前用户已经有名为 `OpenCode to API` 的 Key则直接复用，否则动态发现当前 SolidStart `key.create` Action并创建，再按创建前后 Key ID 差分取得新 Key。
+在「智能路由」页面为每种号池类型单独配置第一候选账号。切换时即时保存。
 
 ## 统一模型入口
 
-Base URL：
-
 ```text
-http://127.0.0.1:3000/v1
-```
-
-支持：
-
-```text
-GET  /v1/models
+GET  /v1/models          — 聚合所有活跃 provider 的模型列表
 POST /v1/chat/completions
 POST /v1/responses
 POST /v1/messages
@@ -103,71 +142,35 @@ POST /v1/messages
 curl http://127.0.0.1:3000/v1/chat/completions \
   -H "Authorization: Bearer ocg_your_key" \
   -H "Content-Type: application/json" \
-  -d '{"model":"anthropic/claude-sonnet-4-5","messages":[{"role":"user","content":"hello"}]}'
+  -d '{"model":"gpt-5.3-codex","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-对上游调用时，`messages` 使用 `x-api-key`，其余 Go 接口使用 Bearer；不会发送 `x-org-id`。
+## 系统设置
 
-## 路由规则
+域名镜像映射、GitHub 镜像站、OpenCode 上游地址、请求超时、维护周期、日志策略等，均可在管理后台「设置」页面配置。
 
-账号必须同时满足以下条件才会进入候选池：
+## 凭据安全
 
-- 管理状态为启用
-- Console 会话有效
-- Go 订阅存在
-- `Use balance` 明确为 `false`
-- 5 小时、周、月窗口均未达到 100%
-- 未超过账号并发上限
+所有凭据（auth cookie、Go API Key、access token、refresh token）使用本机随机生成的主密钥（data/master.key）进行 AES-256-GCM 加密存储。数据库不保存明文。
 
-优先级为：用户指定的优先账号 → 当前账号 → 后续可用账号。只有精确识别到 `GoUsageLimitError` 时才会在同一个外部请求内切换账号；其他 HTTP、模型、参数和网络错误不会触发切号。
-
-## 额度维护
-
-额度来自：
-
-```text
-GET https://opencode.ai/workspace/{workspaceId}/go
-Cookie: auth=...
-```
-
-系统解析 SolidStart SSR hydration 或 `data-slot` 回退格式，保存 `usagePercent` 与 `resetAt`。维护任务只选择：
-
-- 当前路由账号
-- 用户指定的优先账号
-- 最近 10 分钟实际使用的账号
-
-无订阅或不安全账号延迟检查；Cookie 失效后停止检查，直到插件重新连接。
-
-## 系统配置
-
-管理员可在设置页面修改：
-
-- Go 上游地址
-- 上游请求超时
-- 额度维护开关与执行间隔
-- 每批检查数量和并发数
-- API Key Pepper 与定时任务密钥轮换
-
-主加密密钥、API Key Pepper 和 Cron Secret 首次启动自动随机生成，不需要放进 `.env`。
-
-## 验证
+## 开发
 
 ```bash
-npm run lint
-npm test
-npm run build
-cd browser-extension && npm run check
+npm install
+npm run dev        # 开发模式（HMR）
+npm run build      # 生产构建
+npm run test       # 运行测试
+npx tsc --noEmit   # 类型检查
 ```
 
-浏览器真实登录和线上 Key 创建不会包含在自动测试中，需要由部署者自行验证。
+### 关键文件
 
-## 安全说明
-
-- `data/master.key` 与数据库必须一起备份；丢失主密钥后无法解密 Console Cookie 和 Go Key。
-- 浏览器插件拥有 `cookies` 权限，只应从本项目源码加载或由可信渠道分发。
-- 插件不会在 UI、storage session 或日志中展示 `authCookie`；仅将它发送到用户配置的后端。
-- `POST /api/plugin/accounts` 必须使用有效的用户统一 API Key，payload 不能指定 owner。
-- 管理员可以只读查看所有用户的账号状态，但管理员自己的请求绝不会路由其他用户账号。
-- SolidStart Action hash 可能随 OpenCode 发布变化，后端会从当前前端资源动态发现，发现失败时关闭操作而不是猜测成功。
-
-更详细的边界见 [SECURITY.md](SECURITY.md) 与 [docs/architecture.md](docs/architecture.md)。
+- src/server/providers/ — Provider 接口定义、注册表、各 provider 实现
+- src/server/routing.ts — 多号池调度 + model routing + per-pool preference
+- src/server/gateway.ts — 统一网关，provider 分发 + /models 聚合
+- src/server/api-fetch.ts — 带域名镜像拦截的统一 HTTP 请求
+- src/server/settings.ts — 系统配置（域名镜像映射、OpenCode 上游等）
+- src/server/repository.ts — 账号/凭证/模型路由仓储
+- src/app/api/admin/accounts/import/ — Sub2API JSON 导入端点
+- src/app/api/admin/model-routing/ — 模型路由规则 CRUD
+- src/components/dashboard/ — 前端管理页面

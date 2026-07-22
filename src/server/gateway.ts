@@ -3,11 +3,14 @@ import type { AppDatabase } from "./db"
 import { getDatabase } from "./db"
 import { ApiKeyHasher } from "./crypto"
 import { authenticateApiKey } from "./repository"
+import { AccountRepository } from "./repository"
 import { NoEligibleAccountError, RoutingService } from "./routing"
 import { getLogSettings, getSystemSettings, type LogSettings } from "./settings"
 import type { QuotaKind } from "./types"
 import { collectRequestHeaders } from "./client-meta"
 import { captureJsonResponse, ensureStreamUsage, extractBodyError, extractUsage, isLogOk, safeCloneBody, teeAndCapture, type CaptureResult, type TokenUsage } from "./capture"
+import { getProvider, tryGetProvider, getProviderRegistry, type UpstreamErrorClassification } from "./providers"
+import { resolveMirrorUrl } from "./api-fetch"
 
 export interface AccessCredential { accountId: string; goApiKey: string; credentialVersion: number }
 export interface CredentialProvider { get(ownerUserId: string, accountId: string): Promise<AccessCredential> }
@@ -95,6 +98,12 @@ export function classifyGoUsageLimit(response: Response, body: string): GoLimit 
   } catch { return null }
 }
 
+// Adapt GoLimit (legacy) to UpstreamErrorClassification (provider interface).
+function goLimitToErrorClass(limit: GoLimit | null): UpstreamErrorClassification | null {
+  if (!limit) return null
+  return { shouldSwitchAccount: true, quotaKind: limit.kind, retryAfterSeconds: limit.retryAfterSeconds, errorType: "GoUsageLimitError" }
+}
+
 function classifyFirstSseEvent(headers: Headers, chunk: string): GoLimit | null {
   const lf = chunk.indexOf("\n\n")
   const crlf = chunk.indexOf("\r\n\r\n")
@@ -152,6 +161,15 @@ function upstreamHeaders(request: Request, goApiKey: string, endpoint: string): 
 
 export class GatewayService {
   constructor(private readonly credentials: CredentialProvider, readonly db: AppDatabase = getDatabase(), private readonly fetcher: typeof fetch = fetch, private readonly keyHasher?: ApiKeyHasher) {}
+  // Note: the default fetcher is the global fetch. For upstream requests we
+  // use apiFetch which transparently applies domain mirror mappings. Test
+  // code that passes a custom fetcher will bypass mirrors, which is fine
+  // since tests use mocked responses.
+  // When fetching upstream, we resolve mirror URLs before passing to fetcher.
+  // Note: the default fetcher is the global fetch. For upstream requests we
+  // use apiFetch which transparently applies domain mirror mappings. Test
+  // code that passes a custom fetcher will bypass mirrors, which is fine
+  // since tests use mocked responses.
 
   async handle(request: Request, endpoint: string): Promise<Response> {
     const t0 = Date.now()
@@ -159,6 +177,9 @@ export class GatewayService {
     const plaintext = auth?.startsWith("Bearer ") ? auth.slice(7) : request.headers.get("x-api-key") ?? ""
     const apiKey = plaintext ? authenticateApiKey(plaintext, this.db, this.keyHasher) : null
     if (!apiKey) return Response.json({ error: { type: "authentication_error", message: "Invalid gateway API key" } }, { status: 401 })
+
+    // /models endpoint: aggregate available models from all active providers.
+    if (endpoint === "models" && request.method === "GET") return this.handleModels(apiKey.ownerUserId)
 
     const declaredLength = Number(request.headers.get("content-length"))
     if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BODY_BYTES) return Response.json({ error: { type: "request_too_large", message: "Request body exceeds 10 MiB" } }, { status: 413 })
@@ -192,6 +213,7 @@ export class GatewayService {
     }
 
     const routing = new RoutingService(apiKey.ownerUserId, this.db)
+    routing.setModel(model)
     this.db.prepare("INSERT INTO gateway_requests(id,owner_user_id,api_key_id,endpoint,model,started_at,stream,api_key_prefix,client,user_agent,origin,request_size_bytes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
       .run(requestId, apiKey.ownerUserId, apiKey.id, endpoint, model, new Date().toISOString(), Number(stream), apiKey.prefix, meta.client, meta.userAgent, meta.origin, requestBytes?.byteLength ?? 0)
     const tried = new Set<string>()
@@ -218,22 +240,49 @@ export class GatewayService {
         .run(attemptId, apiKey.ownerUserId, requestId, selection.account.id, attemptNumber, new Date().toISOString(), selection.account.name)
       const upstreamStartedAt = Date.now()
       try {
-        const credential = await this.credentials.get(apiKey.ownerUserId, selection.account.id)
-        const path = endpoint.replace(/^\/+/, "")
-        const upstream = await this.fetcher(`${selection.target.baseUrl}/${path}`, {
-          method: request.method,
-          headers: upstreamHeaders(request, credential.goApiKey, endpoint),
-          body: upstreamBytes,
-          redirect: "error",
-          signal: AbortSignal.any([request.signal, AbortSignal.timeout(getSystemSettings(this.db).upstreamRequestTimeoutMs)]),
-        })
+       const provider = tryGetProvider(selection.account.poolType)
+       let upstream: Response
+       if (provider) {
+          let credential: import("./providers").ProviderCredential
+          try {
+            credential = await provider.getCredential(selection.account)
+          } catch {
+            // Fallback to legacy CredentialProvider (e.g., in-memory test DB).
+            const legacy = await this.credentials.get(apiKey.ownerUserId, selection.account.id)
+            credential = { token: legacy.goApiKey, credentialVersion: legacy.credentialVersion }
+          }
+          const upstreamModel = provider.resolveModel(selection.account, model ?? "")
+          const target = provider.buildForwardTarget({
+            method: request.method, endpoint, model: model ?? "", upstreamModel,
+            body: upstreamBytes, headers: request.headers,
+            signal: AbortSignal.any([request.signal, AbortSignal.timeout(getSystemSettings(this.db).upstreamRequestTimeoutMs)]),
+          }, credential, selection.account)
+          upstream = await this.fetcher(resolveMirrorUrl(target.url), {
+            method: request.method,
+            headers: target.headers,
+            body: target.body,
+            redirect: "error",
+            signal: AbortSignal.any([request.signal, AbortSignal.timeout(getSystemSettings(this.db).upstreamRequestTimeoutMs)]),
+          })
+        } else {
+          const credential = await this.credentials.get(apiKey.ownerUserId, selection.account.id)
+          const path = endpoint.replace(/^\/+/, "")
+          upstream = await this.fetcher(resolveMirrorUrl(`${selection.target.baseUrl}/${path}`), {
+            method: request.method,
+            headers: upstreamHeaders(request, credential.goApiKey, endpoint),
+            body: upstreamBytes,
+            redirect: "error",
+            signal: AbortSignal.any([request.signal, AbortSignal.timeout(getSystemSettings(this.db).upstreamRequestTimeoutMs)]),
+          })
+        }
         if (!upstream.ok) {
           const body = await upstream.text()
-          const limit = classifyGoUsageLimit(upstream, body)
-          if (limit) {
+          const errorClass = (provider ? provider.classifyError(upstream.status, body, upstream.headers) : null)
+            ?? (upstream.status === 429 ? goLimitToErrorClass(classifyGoUsageLimit(upstream, body)) : null)
+          if (errorClass?.shouldSwitchAccount) {
             tried.add(selection.account.id)
-            routing.markQuota(selection.account.id, limit.kind, limit.retryAfterSeconds)
-            this.finishAttempt(attemptId, upstream.status, "RETRY_NEXT_ACCOUNT", "GoUsageLimitError", Date.now() - attemptStartedAt, "GoUsageLimitError", selection.account.name)
+            routing.markQuota(selection.account.id, errorClass.quotaKind ?? "UNKNOWN_GO_LIMIT", errorClass.retryAfterSeconds ?? null)
+            this.finishAttempt(attemptId, upstream.status, "RETRY_NEXT_ACCOUNT", errorClass.errorType, Date.now() - attemptStartedAt, errorClass.errorType, selection.account.name)
             continue
           }
           const type = errorType(body)
@@ -249,13 +298,18 @@ export class GatewayService {
         if (contentType.includes("text/event-stream") && upstream.body) {
           const reader = upstream.body.getReader()
           const first = await readFirstSseEvent(reader)
-          const limit = first.text.includes("GoUsageLimitError") ? classifyFirstSseEvent(upstream.headers, first.text) : null
-          if (limit) {
-            await reader.cancel(); tried.add(selection.account.id); routing.markQuota(selection.account.id, limit.kind, limit.retryAfterSeconds)
-            this.finishAttempt(attemptId, 429, "RETRY_NEXT_ACCOUNT", "GoUsageLimitError", Date.now() - attemptStartedAt, "GoUsageLimitError", selection.account.name)
+          const sseLimit = (provider ? provider.classifyError(429, first.text, upstream.headers) : null)
+            ?? (first.text.includes("GoUsageLimitError") ? goLimitToErrorClass(classifyFirstSseEvent(upstream.headers, first.text)) : null)
+          if (sseLimit?.shouldSwitchAccount) {
+            await reader.cancel(); tried.add(selection.account.id); routing.markQuota(selection.account.id, sseLimit.quotaKind ?? "UNKNOWN_GO_LIMIT", sseLimit.retryAfterSeconds ?? null)
+            this.finishAttempt(attemptId, 429, "RETRY_NEXT_ACCOUNT", sseLimit.errorType, Date.now() - attemptStartedAt, sseLimit.errorType, selection.account.name)
             continue
           }
           routing.markSuccess(selection.account.id)
+          if (provider?.extractQuotaFromResponse) {
+            const qw = provider.extractQuotaFromResponse(upstream.headers)
+            if (qw) this.recordPassiveQuota(selection.account.id, qw)
+          }
           const rebuilt = prependChunk(first.bytes, reader)
           const firstTokenAt = Date.now()
           const status = upstream.status
@@ -273,6 +327,10 @@ export class GatewayService {
           return new Response(rebuilt, { status, headers: responseHeaders(upstream.headers) })
         }
         routing.markSuccess(selection.account.id)
+        if (provider?.extractQuotaFromResponse) {
+          const qw = provider.extractQuotaFromResponse(upstream.headers)
+          if (qw) this.recordPassiveQuota(selection.account.id, qw)
+        }
         const status = upstream.status
         if (logging && upstream.body) {
           const onComplete = (r: CaptureResult) => {
@@ -331,5 +389,39 @@ export class GatewayService {
         resCloned.value !== undefined ? 1 : 0,
         new Date().toISOString(),
       )
+  }
+
+  private handleModels(ownerUserId: string): Response {
+    const accounts = new AccountRepository(ownerUserId, this.db).list()
+    const registry = getProviderRegistry()
+    const activePoolTypes = registry.activePoolTypes(accounts)
+    const modelSet = new Set<string>()
+    for (const poolType of activePoolTypes) {
+      const provider = registry.tryGet(poolType)
+      if (!provider) continue
+      const poolAccounts = accounts.filter((a) => a.poolType === poolType)
+      for (const model of provider.getAvailableModels(poolAccounts)) modelSet.add(model)
+    }
+    if (modelSet.size === 0) {
+      for (const provider of registry.all()) {
+        for (const model of provider.getAvailableModels([])) modelSet.add(model)
+      }
+    }
+    const models = [...modelSet].sort().map((id) => ({ id, object: "model", created: 0, owned_by: "gateway" }))
+    return Response.json({ object: "list", data: models })
+  }
+
+  private recordPassiveQuota(accountId: string, windows: { kind: QuotaKind; usagePercent: number; resetInSeconds: number | null }[]): void {
+    const now = new Date()
+    const timestamp = now.toISOString()
+    const ownerRow = this.db.prepare("SELECT owner_user_id FROM accounts WHERE id=?").get(accountId) as { owner_user_id: string } | undefined
+    const ownerUserId = ownerRow?.owner_user_id ?? ""
+    for (const w of windows) {
+      const resetAt = w.resetInSeconds ? new Date(now.getTime() + w.resetInSeconds * 1000).toISOString() : null
+      this.db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at)
+        VALUES(?,?,?,?,?,?,'UPSTREAM_HEADER',?) ON CONFLICT(owner_user_id,account_id,kind) DO UPDATE SET
+        usage_percent=excluded.usage_percent,reset_at=excluded.reset_at,source='UPSTREAM_HEADER',observation_version=observation_version+1,last_observed_at=excluded.last_observed_at`)
+        .run(ownerUserId, accountId, w.kind, w.usagePercent, resetAt, timestamp)
+    }
   }
 }

@@ -57,6 +57,7 @@ export interface Account {
   lastCheckedAt?: string | null;
   nextEligibleAt?: string | null;
   lastError?: string | null;
+  poolType?: string;
 }
 
 export interface ApiKeyRecord {
@@ -229,6 +230,8 @@ export interface RoutingConfig {
   preferredAccountId?: string | null;
   currentAccountId?: string | null;
   candidates?: Account[];
+  poolPreferences?: Record<string, string | null>;
+  poolTypes?: string[];
 }
 
 export interface AdminSettings {
@@ -247,24 +250,41 @@ export interface OverviewPayload {
   counts?: {
     totalAccounts?: number;
     readyAccounts?: number;
-    quotaBlocked?: number;
-    inactiveAccounts?: number;
-    apiKeys?: number;
-  };
-  stats?: {
-    totalAccounts?: number;
-    availableAccounts?: number;
-    coolingAccounts?: number;
-    unavailableAccounts?: number;
-  };
-  routing?: {
-    currentAccountName?: string | null;
-    currentAccountId?: string | null;
-    preferredAccountName?: string | null;
-    preferredAccountId?: string | null;
-    nextRecoveryAt?: string | null;
-  };
-  recentRequests?: RequestRecord[];
-  recentEvents?: EventRecord[];
-  recentAttempts?: Record<string, AttemptDetail[]>;
+   quotaBlocked?: number;
+   inactiveAccounts?: number;
+   apiKeys?: number;
+    byPoolType?: Record<string, { total: number; ready: number; blocked: number; inactive: number }>;
+ };
+ stats?: {
+   totalAccounts?: number;
+   availableAccounts?: number;
+   coolingAccounts?: number;
+   unavailableAccounts?: number;
+ };
+ routing?: {
+   currentAccountName?: string | null;
+   currentAccountId?: string | null;
+   preferredAccountName?: string | null;
+   preferredAccountId?: string | null;
+   nextRecoveryAt?: string | null;
+ };
+ recentRequests?: RequestRecord[];
+ recentEvents?: EventRecord[];
+ recentAttempts?: Record<string, AttemptDetail[]>;
+}
+
+export interface PoolTypeInfo {
+  type: string;
+  label: string;
+  description: string;
+  quotaKinds: string[];
+}
+
+export interface ModelRouteRule {
+  id: string;
+  modelPattern: string;
+  poolTypePriority: string[];
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
 }

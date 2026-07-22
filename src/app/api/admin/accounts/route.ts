@@ -2,6 +2,7 @@ import { AccountRepository } from "@/server/repository"
 import { getDatabase } from "@/server/db"
 import { requireSession } from "../_auth"
 import { RoutingService } from "@/server/routing"
+import { tryGetProvider, POOL_TYPE_METADATA } from "@/server/providers"
 
 export const runtime = "nodejs"
 
@@ -18,7 +19,10 @@ export async function GET(request: Request) {
       ...account,
       isCurrent: routing.currentAccountId === account.id,
       isPreferred: routing.preferredAccountId === account.id,
-      routingEligible: account.adminState === "ENABLED" && account.authState === "VALID" && account.subscriptionState === "ACTIVE" && account.billingGuard === "VERIFIED_GO_ONLY" && account.useBalance === false,
+      routingEligible: (() => {
+        const provider = tryGetProvider(account.poolType)
+        return provider ? provider.isAccountReady(account) : account.adminState === "ENABLED" && account.authState === "VALID" && account.subscriptionState === "ACTIVE" && account.billingGuard === "VERIFIED_GO_ONLY" && account.useBalance === false
+      })(),
       quotaWindows: windows.filter((window) => window.account_id === account.id).map((window) => ({
         kind: window.kind,
         usagePercent: window.usage_percent,
@@ -27,5 +31,10 @@ export async function GET(request: Request) {
         lastObservedAt: window.last_observed_at,
       })),
     }}),
+    poolTypes: Object.keys(POOL_TYPE_METADATA).map((key) => {
+      const meta = POOL_TYPE_METADATA[key as keyof typeof POOL_TYPE_METADATA]
+      return { type: meta.type, label: meta.label, description: meta.description, quotaKinds: meta.quotaKinds, credentialFields: meta.credentialFields }
+    }),
+    poolPreferences: new RoutingService(user.id, db).getPoolPreferences(),
   })
 }

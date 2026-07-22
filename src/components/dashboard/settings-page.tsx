@@ -22,6 +22,7 @@ import type { LogsCleanupResponse } from "./types";
 
 interface Settings {
   githubMirrorUrl: string;
+  domainMirrorMap: Record<string, string>;
   upstreamBaseUrl: string;
   upstreamRequestTimeoutMs: number;
   maintenanceEnabled: boolean;
@@ -170,6 +171,67 @@ export function SettingsPage() {
                   onChange={(e) => update("githubMirrorUrl", e.target.value)}
                   placeholder="https://githubfast.com"
                 />
+              </Field>
+              <Field label="域名镜像映射" description="全局域名级镜像配置。填写原始域名到镜像地址的映射，所有出站请求自动走镜像。留空则直连。">
+                <div className="space-y-2">
+                  {(Object.entries(form.domainMirrorMap || {})).map(([domain, mirror], idx) => (
+                    <div key={idx} className="flex items-center gap-2">
+                      <Input
+                        className="flex-1 font-mono text-xs"
+                        value={domain}
+                        readOnly
+                        placeholder="chatgpt.com"
+                      />
+                      <span className="text-muted-foreground">→</span>
+                      <Input
+                        className="flex-1 font-mono text-xs"
+                        value={mirror}
+                        readOnly
+                        placeholder="https://your-mirror.com"
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        type="button"
+                        onClick={() => {
+                          const next = { ...form.domainMirrorMap }
+                          delete next[domain]
+                          update("domainMirrorMap", next)
+                        }}
+                      >
+                        删除
+                      </Button>
+                    </div>
+                  ))}
+                  <div className="flex items-center gap-2">
+                    <Input
+                      id="mirror-domain-new"
+                      className="flex-1 font-mono text-xs"
+                      placeholder="chatgpt.com"
+                    />
+                    <span className="text-muted-foreground">→</span>
+                    <Input
+                      id="mirror-url-new"
+                      className="flex-1 font-mono text-xs"
+                      placeholder="https://your-mirror.com"
+                    />
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      type="button"
+                      onClick={() => {
+                        const d = (document.getElementById("mirror-domain-new") as HTMLInputElement)?.value?.trim()
+                        const m = (document.getElementById("mirror-url-new") as HTMLInputElement)?.value?.trim()
+                        if (!d || !m) return
+                        update("domainMirrorMap", { ...form.domainMirrorMap, [d.toLowerCase()]: m.replace(/\/$/, "") })
+                        ;(document.getElementById("mirror-domain-new") as HTMLInputElement).value = ""
+                        ;(document.getElementById("mirror-url-new") as HTMLInputElement).value = ""
+                      }}
+                    >
+                      添加
+                    </Button>
+                  </div>
+                </div>
               </Field>
               <Field label="请求上游地址" description="Go API Key 调用的官方上游地址，仅支持 opencode.ai 官方 HTTPS 端点。">
                 <Input

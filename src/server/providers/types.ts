@@ -1,0 +1,86 @@
+import type { AccountRecord, QuotaKind } from "../types"
+
+// Pool Type
+
+export const POOL_TYPES = ["opencode-go", "openai-cpa", "openai-oauth"] as const
+export type PoolType = (typeof POOL_TYPES)[number]
+
+export const POOL_TYPE_LABELS: Record<PoolType, string> = {
+  "opencode-go": "OpenCode Go",
+  "openai-cpa": "OpenAI CPA",
+  "openai-oauth": "OpenAI OAuth",
+}
+
+// Quota
+
+export interface QuotaWindow {
+  kind: QuotaKind
+  usagePercent: number
+  resetAt: string | null
+  resetInSeconds: number | null
+  lastObservedAt: string
+  source: "DASHBOARD" | "UPSTREAM_429" | "UPSTREAM_HEADER" | "API_PROBE"
+}
+
+// Credential
+
+export interface ProviderCredential {
+  token: string
+  extraHeaders?: Record<string, string>
+  credentialVersion: number
+}
+
+// Upstream Error Classification
+
+export interface UpstreamErrorClassification {
+  shouldSwitchAccount: boolean
+  quotaKind?: QuotaKind
+  retryAfterSeconds?: number | null
+  errorType: string
+}
+
+// Forward Request
+
+export interface ForwardRequestInput {
+  method: string
+  endpoint: string
+  model: string
+  upstreamModel: string
+  body: Uint8Array<ArrayBuffer> | null
+  headers: Headers
+  signal: AbortSignal
+}
+
+export interface ForwardTarget {
+  url: string
+  headers: Headers
+  body: Uint8Array<ArrayBuffer> | null
+}
+
+// Provider Interface
+
+export interface Provider {
+  readonly poolType: PoolType
+  readonly displayName: string
+  supportedQuotaKinds(): readonly QuotaKind[]
+  refreshQuota(accountId: string, account: AccountRecord): Promise<QuotaWindow[]>
+  getAvailableModels(accounts: AccountRecord[]): string[]
+  resolveModel(account: AccountRecord, requestedModel: string): string
+  getCredential(account: AccountRecord): Promise<ProviderCredential>
+  validateCredential(account: AccountRecord): Promise<{ valid: boolean; email?: string; planType?: string; extra?: Record<string, unknown> }>
+  getUpstreamBaseUrl(account: AccountRecord): string
+  buildForwardTarget(input: ForwardRequestInput, credential: ProviderCredential, account: AccountRecord): ForwardTarget
+  classifyError(status: number, body: string, headers: Headers): UpstreamErrorClassification | null
+  extractQuotaFromResponse?(headers: Headers): QuotaWindow[] | null
+  isAccountReady(account: AccountRecord): boolean
+}
+
+// Pool Type Metadata
+
+export interface PoolTypeMeta {
+  type: PoolType
+  label: string
+  description: string
+  quotaKinds: readonly QuotaKind[]
+  credentialFields: { key: string; label: string; required: boolean; type: "text" | "password" | "textarea" }[]
+}

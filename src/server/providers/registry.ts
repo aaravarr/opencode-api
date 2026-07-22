@@ -1,0 +1,95 @@
+import type { PoolType, PoolTypeMeta, Provider } from "./types"
+import type { AccountRecord, QuotaKind } from "../types"
+
+// ─── Pool Type Metadata ──────────────────────────────────────────────────
+
+export const POOL_TYPE_METADATA: Record<PoolType, PoolTypeMeta> = {
+  "opencode-go": {
+    type: "opencode-go",
+    label: "OpenCode Go",
+    description: "OpenCode Go subscription via browser extension. Upstream: opencode.ai/zen/go/v1",
+    quotaKinds: ["FIVE_HOUR", "WEEKLY", "MONTHLY"] as readonly QuotaKind[],
+    credentialFields: [],
+  },
+  "openai-cpa": {
+    type: "openai-cpa",
+    label: "OpenAI CPA",
+    description: "OpenAI Codex Personal Access Token (at-*). Upstream: chatgpt.com/backend-api/codex/responses",
+    quotaKinds: ["FIVE_HOUR", "WEEKLY"] as readonly QuotaKind[],
+    credentialFields: [
+      { key: "token", label: "Access Token (at-*)", required: true, type: "password" },
+      { key: "chatgptAccountId", label: "ChatGPT Account ID", required: false, type: "text" },
+    ],
+  },
+  "openai-oauth": {
+    type: "openai-oauth",
+    label: "OpenAI OAuth",
+    description: "OpenAI OAuth subscription with refresh token. Upstream: chatgpt.com/backend-api/codex/responses",
+    quotaKinds: ["FIVE_HOUR", "WEEKLY"] as readonly QuotaKind[],
+    credentialFields: [
+      { key: "accessToken", label: "Access Token", required: true, type: "password" },
+      { key: "refreshToken", label: "Refresh Token", required: true, type: "password" },
+      { key: "chatgptAccountId", label: "ChatGPT Account ID", required: false, type: "text" },
+    ],
+  },
+}
+
+// ─── Registry ────────────────────────────────────────────────────────────
+
+class ProviderRegistry {
+  private readonly providers = new Map<PoolType, Provider>()
+
+  register(provider: Provider): void {
+    if (this.providers.has(provider.poolType)) {
+      throw new Error(`Provider already registered for pool type: ${provider.poolType}`)
+    }
+    this.providers.set(provider.poolType, provider)
+  }
+
+  get(poolType: PoolType): Provider {
+    const provider = this.providers.get(poolType)
+    if (!provider) throw new Error(`No provider registered for pool type: ${poolType}`)
+    return provider
+  }
+
+  tryGet(poolType: PoolType): Provider | undefined {
+    return this.providers.get(poolType)
+  }
+
+  all(): Provider[] {
+    return [...this.providers.values()]
+  }
+
+  registeredPoolTypes(): PoolType[] {
+    return [...this.providers.keys()]
+  }
+
+  // Get all pool types that have at least one ready account
+  activePoolTypes(accounts: AccountRecord[]): PoolType[] {
+    const types = new Set<PoolType>()
+    for (const account of accounts) {
+      const provider = this.tryGet(account.poolType)
+      if (provider && provider.isAccountReady(account)) types.add(account.poolType)
+    }
+    return [...types]
+  }
+}
+
+let globalRegistry: ProviderRegistry | undefined
+
+export function getProviderRegistry(): ProviderRegistry {
+  if (!globalRegistry) {
+    globalRegistry = new ProviderRegistry()
+  }
+  return globalRegistry
+}
+
+export function getProvider(poolType: PoolType): Provider {
+  return getProviderRegistry().get(poolType)
+}
+
+export function tryGetProvider(poolType: PoolType): Provider | undefined {
+  return getProviderRegistry().tryGet(poolType)
+}
+
+export { type ProviderRegistry }
