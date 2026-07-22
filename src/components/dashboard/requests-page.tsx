@@ -9,11 +9,14 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EmptyState, ErrorState, LoadingTable, PageIntro, Panel, formatDate } from "./page-kit";
 import { StatusBadge } from "./status-ui";
+import { PoolTypeBadge } from "./status-ui";
 import { useAdmin } from "./admin-context";
 import { useAdminResource } from "./use-admin-resource";
 import type { AttemptDetail, RequestDetail, RequestListResponse, RequestRecord } from "./types";
 
 const pageSize = 20;
+
+interface AccountsResponse { accounts: { id: string; poolType?: string }[] }
 
 export function RequestsPage() {
   const [page, setPage] = useState(1);
@@ -40,6 +43,14 @@ export function RequestsPage() {
 
   const path = `/api/admin/requests?${params}`;
   const resource = useAdminResource<RequestListResponse>(path);
+  const accountsResource = useAdminResource<AccountsResponse>("/api/admin/accounts");
+  const poolTypeByAccountId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const account of accountsResource.data?.accounts ?? []) {
+      if (account.poolType) map.set(account.id, account.poolType);
+    }
+    return map;
+  }, [accountsResource.data]);
   const [selected, setSelected] = useState<RequestRecord | null>(null);
 
   const items = resource.data?.items ?? [];
@@ -123,7 +134,12 @@ export function RequestsPage() {
                   <TableCell>
                     <StatusBadge status={request.ok ? "success" : request.status != null ? "failed" : "unknown"} />
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{request.accountName || "未分配"}</TableCell>
+                  <TableCell className="font-mono text-xs">
+                    <span className="inline-flex items-center gap-1.5">
+                      {request.accountName || "未分配"}
+                      {request.accountId ? <PoolTypeBadge poolType={poolTypeByAccountId.get(request.accountId)} /> : null}
+                    </span>
+                  </TableCell>
                   <TableCell className="tabular text-right font-mono text-xs">{request.attemptCount ?? 0}</TableCell>
                   <TableCell className="tabular text-right font-mono text-xs">{request.latencyMs != null ? `${request.latencyMs} ms` : "—"}</TableCell>
                  <TableCell className="tabular text-right font-mono text-xs">{request.firstTokenMs != null ? `${request.firstTokenMs} ms` : "—"}</TableCell>
@@ -162,12 +178,17 @@ export function RequestsPage() {
         ) : null}
       </Panel>
 
-      <RequestDetailSheet key={selected?.id ?? "closed"} request={selected} onOpenChange={(open) => { if (!open) setSelected(null); }} />
+      <RequestDetailSheet
+        key={selected?.id ?? "closed"}
+        request={selected}
+        onOpenChange={(open) => { if (!open) setSelected(null); }}
+        poolType={selected?.accountId ? poolTypeByAccountId.get(selected.accountId) : undefined}
+      />
     </>
   );
 }
 
-function RequestDetailSheet({ request, onOpenChange }: { request: RequestRecord | null; onOpenChange: (open: boolean) => void }) {
+function RequestDetailSheet({ request, onOpenChange, poolType }: { request: RequestRecord | null; onOpenChange: (open: boolean) => void; poolType?: string }) {
   const { sessionFetch } = useAdmin();
   const [detail, setDetail] = useState<RequestDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -212,7 +233,7 @@ function RequestDetailSheet({ request, onOpenChange }: { request: RequestRecord 
                 <ErrorState message={error} />
               ) : detail ? (
                 <div className="space-y-6">
-                  <BasicInfo request={detail.request} />
+                  <BasicInfo request={detail.request} poolType={poolType} />
                   <TokenBreakdown request={detail.request} />
                   <FailoverTimeline attempts={detail.attempts} />
                   <HeadersBlock headers={detail.request.headers} />
@@ -236,10 +257,10 @@ function RequestDetailSheet({ request, onOpenChange }: { request: RequestRecord 
   );
 }
 
-function BasicInfo({ request }: { request: RequestDetail["request"] }) {
+function BasicInfo({ request, poolType }: { request: RequestDetail["request"]; poolType?: string }) {
   const rows: Array<[string, string]> = [
     ["密钥", request.apiKeyName || request.apiKeyPrefix || "—"],
-    ["服务账号", request.accountName || "—"],
+    ["__account__", request.accountName || "—"],
     ["Endpoint", request.endpoint || "—"],
     ["Stream", request.stream ? "是" : "否"],
     ["HTTP 状态", request.status != null ? String(request.status) : "—"],
@@ -260,8 +281,11 @@ function BasicInfo({ request }: { request: RequestDetail["request"] }) {
       <div className="grid gap-x-4 gap-y-2 sm:grid-cols-2">
         {rows.map(([label, value]) => (
           <div key={label} className="grid grid-cols-[88px_minmax(0,1fr)] items-center gap-2 text-xs">
-            <span className="text-muted-foreground">{label}</span>
-            <span className="truncate font-mono" title={value}>{value}</span>
+            <span className="text-muted-foreground">{label === "__account__" ? "服务账号" : label}</span>
+            <span className="inline-flex items-center gap-1.5 truncate font-mono" title={value}>
+              {value}
+              {label === "__account__" ? <PoolTypeBadge poolType={poolType} /> : null}
+            </span>
           </div>
         ))}
       </div>

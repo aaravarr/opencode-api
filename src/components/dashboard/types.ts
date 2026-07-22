@@ -175,6 +175,7 @@ export interface Bucket {
   totalTokens: number;
   cachedTokens: number;
   reasoningTokens: number;
+  poolType?: string;
 }
 
 export interface UsageSummary {
@@ -223,6 +224,7 @@ export interface EventRecord {
   accountName?: string | null;
   message?: string | null;
   detail?: string | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface RoutingConfig {

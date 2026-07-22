@@ -19,6 +19,6 @@ describe("usage maintenance candidates", () => {
     db.prepare("UPDATE accounts SET next_usage_check_at=?,last_request_at=? WHERE id=?").run(new Date(now.getTime() - 1_000).toISOString(), new Date(now.getTime() - 5 * 60_000).toISOString(), recent)
     db.prepare("UPDATE accounts SET next_usage_check_at=?,last_request_at=? WHERE id=?").run(new Date(now.getTime() - 1_000).toISOString(), new Date(now.getTime() - 60 * 60_000).toISOString(), idle)
     db.prepare("INSERT INTO routing_state(owner_user_id,preferred_account_id,current_account_id,updated_at) VALUES(?,?,?,?)").run("owner", idle, idle, now.toISOString())
-    expect(listDueUsageCandidates(db, now)).toEqual([{ ownerUserId: "owner", accountId: recent }])
+    expect(listDueUsageCandidates(db, now)).toEqual([{ ownerUserId: "owner", accountId: recent, poolType: "opencode-go" }])
   })
 })

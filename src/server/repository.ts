@@ -245,13 +245,13 @@ export class ModelRoutingRepository {
   }
 }
 
-export function listDueUsageCandidates(db: AppDatabase = getDatabase(), now = new Date(), limit = 25): { ownerUserId: string; accountId: string }[] {
+export function listDueUsageCandidates(db: AppDatabase = getDatabase(), now = new Date(), limit = 25): { ownerUserId: string; accountId: string; poolType: string }[] {
   const activeSince = new Date(now.getTime() - 10 * 60_000).toISOString()
-  return (db.prepare(`SELECT DISTINCT a.owner_user_id,a.id FROM accounts a JOIN users u ON u.id=a.owner_user_id
+  return (db.prepare(`SELECT DISTINCT a.owner_user_id,a.id,a.pool_type FROM accounts a JOIN users u ON u.id=a.owner_user_id
     WHERE u.status='ACTIVE' AND a.admin_state='ENABLED' AND a.auth_state='VALID' AND a.next_usage_check_at<=?
       AND a.last_request_at>=?
-    ORDER BY a.next_usage_check_at LIMIT ?`).all(now.toISOString(), activeSince, limit) as { owner_user_id: string; id: string }[])
-    .map((row) => ({ ownerUserId: row.owner_user_id, accountId: row.id }))
+    ORDER BY a.next_usage_check_at LIMIT ?`).all(now.toISOString(), activeSince, limit) as { owner_user_id: string; id: string; pool_type: string }[])
+    .map((row) => ({ ownerUserId: row.owner_user_id, accountId: row.id, poolType: row.pool_type ?? "opencode-go" }))
 }
 
 export interface ApiKeyRecord { id: string; ownerUserId: string; name: string; prefix: string; enabled: boolean; allowedModels: string[] | null; expiresAt: string | null; lastUsedAt: string | null; createdAt: string; revealable: boolean; requestCount?: number }

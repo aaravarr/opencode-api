@@ -26,12 +26,21 @@ import {
 } from "@/components/ui/chart";
 import { EmptyState, ErrorState, LoadingTable, PageIntro, Panel } from "./page-kit";
 import { useAdminResource } from "./use-admin-resource";
+import { PoolTypeBadge } from "./status-ui";
 import type { Bucket, UsageStats } from "./types";
 
 const palette = ["#0070f3", "#7928ca", "#0a7a3e", "#ab570a", "#ee0000", "#00a0a0", "#333", "#888"];
 
 type RangeKey = "1h" | "6h" | "24h" | "7d" | "30d";
 type Granularity = "auto" | "5m" | "1m" | "1h" | "1d";
+
+type PoolTypeFilter = "" | "opencode-go" | "openai-cpa" | "openai-oauth";
+const poolTypeOptions: { value: PoolTypeFilter; label: string }[] = [
+  { value: "", label: "全部号池" },
+  { value: "opencode-go", label: "OpenCode Go" },
+  { value: "openai-cpa", label: "OpenAI CPA" },
+  { value: "openai-oauth", label: "OpenAI OAuth" },
+];
 
 const rangeHours: Record<RangeKey, number> = { "1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720 };
 const rangeLabels: Record<RangeKey, string> = { "1h": "1 小时", "6h": "6 小时", "24h": "24 小时", "7d": "7 天", "30d": "30 天" };
@@ -84,9 +93,11 @@ function formatMs(value: number | null | undefined): string {
 export function UsagePage() {
   const [range, setRange] = useState<RangeKey>("24h");
   const [granularity, setGranularity] = useState<Granularity>("auto");
+  const [poolType, setPoolType] = useState<PoolTypeFilter>("");
   const effectiveGranularity = granularity === "auto" ? autoGranularity(range) : granularity;
   const hours = rangeHours[range];
-  const path = `/api/admin/usage?hours=${hours}&granularity=${granularity}`;
+  const poolParam = poolType ? `&poolType=${poolType}` : "";
+  const path = `/api/admin/usage?hours=${hours}&granularity=${granularity}${poolParam}`;
   const resource = useAdminResource<UsageStats>(path);
   const data = resource.data;
 
@@ -142,6 +153,16 @@ export function UsagePage() {
         <span className="text-xs text-muted-foreground">
           粒度：{granLabels[effectiveGranularity]}
         </span>
+        <Select value={poolType} onValueChange={(value) => setPoolType(value as PoolTypeFilter)}>
+          <SelectTrigger size="sm" className="w-32">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {poolTypeOptions.map((option) => (
+              <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       {resource.error ? (
@@ -365,38 +386,72 @@ function ModelDistributionChart({ buckets }: { buckets: Bucket[] }) {
 }
 
 function AccountChart({ buckets }: { buckets: Bucket[] }) {
-  const data = useMemo(
+  const sorted = useMemo(
     () =>
       buckets
-        .map((bucket) => {
-          const seg = tokenSegmentsFromBucket(bucket);
-          return {
-            key: bucket.key,
-            label: bucket.label,
-            uncachedIn: seg.uncachedIn,
-            cached: seg.cached,
-            outputNonReason: seg.outputNonReason,
-            reasoning: seg.reasoning,
-          };
-        })
-        .sort((a, b) => a.uncachedIn + a.cached + a.outputNonReason + a.reasoning - (b.uncachedIn + b.cached + b.outputNonReason + b.reasoning))
-        .slice(-10),
-    [buckets]
+        .map((bucket) => ({ bucket, total: bucket.totalTokens || 0 }))
+        .sort((a, b) => b.total - a.total)
+        .slice(0, 10),
+    [buckets],
+  );
+  const data = useMemo(
+    () =>
+      sorted.map(({ bucket }) => {
+        const seg = tokenSegmentsFromBucket(bucket);
+        return {
+          key: bucket.key,
+          label: bucket.label,
+          uncachedIn: seg.uncachedIn,
+          cached: seg.cached,
+          outputNonReason: seg.outputNonReason,
+          reasoning: seg.reasoning,
+        };
+      }),
+    [sorted],
   );
   return (
-    <ChartContainer config={tokenChartConfig} className="aspect-auto h-64 w-full p-4">
-      <BarChart data={data} layout="vertical" margin={{ top: 8, right: 16, bottom: 0, left: 8 }}>
-        <CartesianGrid horizontal={false} strokeDasharray="3 3" stroke="#eee" />
-        <XAxis type="number" tickLine={false} axisLine={false} tickMargin={8} fontSize={11} tickFormatter={formatNumber} />
-        <YAxis type="category" dataKey="label" tickLine={false} axisLine={false} width={100} fontSize={11} />
-        <ChartTooltip content={<ChartTooltipContent indicator="dot" />} />
-        <ChartLegend content={<ChartLegendContent verticalAlign="top" />} />
-        <Bar dataKey="uncachedIn" stackId="tokens" fill={palette[0]} />
-        <Bar dataKey="cached" stackId="tokens" fill={palette[5]} />
-        <Bar dataKey="outputNonReason" stackId="tokens" fill={palette[2]} />
-        <Bar dataKey="reasoning" stackId="tokens" fill={palette[1]} />
-      </BarChart>
-    </ChartContainer>
+    <div className="space-y-3">
+      <ChartContainer config={tokenChartConfig} className="aspect-auto h-64 w-full p-4">
+        <BarChart data={data} layout="vertical" margin={{ top: 8, right: 16, bottom: 0, left: 8 }}>
+          <CartesianGrid horizontal={false} strokeDasharray="3 3" stroke="#eee" />
+          <XAxis type="number" tickLine={false} axisLine={false} tickMargin={8} fontSize={11} tickFormatter={formatNumber} />
+          <YAxis type="category" dataKey="label" tickLine={false} axisLine={false} width={100} fontSize={11} />
+          <ChartTooltip content={<ChartTooltipContent indicator="dot" />} />
+          <ChartLegend content={<ChartLegendContent verticalAlign="top" />} />
+          <Bar dataKey="uncachedIn" stackId="tokens" fill={palette[0]} />
+          <Bar dataKey="cached" stackId="tokens" fill={palette[5]} />
+          <Bar dataKey="outputNonReason" stackId="tokens" fill={palette[2]} />
+          <Bar dataKey="reasoning" stackId="tokens" fill={palette[1]} />
+        </BarChart>
+      </ChartContainer>
+      <AccountPoolList buckets={buckets} />
+    </div>
+  );
+}
+
+function AccountPoolList({ buckets }: { buckets: Bucket[] }) {
+  const rows = useMemo(
+    () =>
+      [...buckets]
+        .sort((a, b) => (b.totalTokens || 0) - (a.totalTokens || 0))
+        .slice(0, 12),
+    [buckets],
+  );
+  return (
+    <div className="border-t">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-3 gap-y-1.5 px-4 py-3 text-xs">
+        {rows.map((bucket) => (
+          <div key={bucket.key} className="contents">
+            <span className="flex items-center gap-1.5 truncate font-mono text-muted-foreground" title={bucket.label}>
+              {bucket.label}
+              <PoolTypeBadge poolType={bucket.poolType} />
+            </span>
+            <span className="tabular text-right font-mono text-muted-foreground">{formatNumber(bucket.totalTokens || 0)}</span>
+            <span className="tabular text-right font-mono text-muted-foreground">{formatNumber(bucket.requests)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

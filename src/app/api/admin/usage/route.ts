@@ -40,6 +40,7 @@ interface Bucket {
   totalTokens: number;
   cachedTokens: number;
   reasoningTokens: number;
+  poolType?: string;
 }
 
 interface UsageSummary {
@@ -155,8 +156,9 @@ export function GET(request: Request): Response {
   const gran = clampGranularity(hours, requestedGran === "auto" ? autoGranularity(hours) : requestedGran);
   const model = url.searchParams.get("model");
   const accountId = url.searchParams.get("accountId");
-  const apiKeyId = url.searchParams.get("apiKeyId");
-  const cacheKey = `${user.id}|${hours}|${gran}|${model ?? ""}|${accountId ?? ""}|${apiKeyId ?? ""}`;
+ const apiKeyId = url.searchParams.get("apiKeyId");
+  const poolType = url.searchParams.get("poolType");
+  const cacheKey = `${user.id}|${hours}|${gran}|${model ?? ""}|${accountId ?? ""}|${apiKeyId ?? ""}|${poolType ?? ""}`;
   const cached = cache.get(cacheKey);
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return Response.json(cached.data);
 
@@ -168,11 +170,16 @@ export function GET(request: Request): Response {
   const params: (string | number)[] = [user.id, fromIso, toIso];
   if (model) { conditions.push("model = ?"); params.push(model) }
   if (accountId) { conditions.push("account_id = ?"); params.push(accountId) }
-  if (apiKeyId) { conditions.push("api_key_id = ?"); params.push(apiKeyId) }
+ if (apiKeyId) { conditions.push("api_key_id = ?"); params.push(apiKeyId) }
+  if (poolType) { conditions.push("account_id IN (SELECT id FROM accounts WHERE owner_user_id = ? AND pool_type = ?)"); params.push(user.id, poolType) }
   const rows = db.prepare(`SELECT started_at,status,ok,latency_ms,local_prep_ms,first_token_ms,model,account_id,account_name,api_key_id,api_key_prefix,prompt_tokens,completion_tokens,total_tokens,cached_tokens,reasoning_tokens,stream FROM gateway_requests WHERE ${conditions.join(" AND ")}`).all(...params) as BucketRow[];
   const apiKeyNames = new Map(
     (db.prepare("SELECT id,name FROM api_keys WHERE owner_user_id=?").all(user.id) as Array<{ id: string; name: string }>)
       .map((key) => [key.id, key.name] as const),
+  );
+  const accountPoolTypes = new Map(
+    (db.prepare("SELECT id,pool_type FROM accounts WHERE owner_user_id=?").all(user.id) as Array<{ id: string; pool_type: string }>)
+      .map((row) => [row.id, row.pool_type] as const),
   );
 
   const bucketSeconds = granularitySeconds(gran);
@@ -199,7 +206,8 @@ export function GET(request: Request): Response {
     addRow(modelBucket, row);
     if (row.account_id) {
       let accBucket = byAccount.get(row.account_id);
-      if (!accBucket) { accBucket = createBucket(row.account_id, row.account_name ?? row.account_id); byAccount.set(row.account_id, accBucket) }
+     if (!accBucket) { accBucket = createBucket(row.account_id, row.account_name ?? row.account_id); byAccount.set(row.account_id, accBucket) }
+      accBucket.poolType = accountPoolTypes.get(row.account_id);
       addRow(accBucket, row);
     }
     if (row.api_key_id) {

@@ -4,6 +4,7 @@ import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EmptyState, ErrorState, LoadingTable, PageIntro, Panel, formatDate } from "./page-kit";
 import { StatusBadge } from "./status-ui";
+import { PoolTypeBadge } from "./status-ui";
 import { useAdminResource } from "./use-admin-resource";
 import type { EventRecord } from "./types";
 
@@ -14,6 +15,13 @@ const levelStatus: Record<string, string> = {
   WARN: "blocked",
   ERROR: "failed",
 };
+
+function poolTypeOf(event: EventRecord): string | null {
+  const meta = event.metadata as Record<string, unknown> | null | undefined;
+  if (!meta) return null;
+  const value = meta.poolType ?? meta.pool_type;
+  return typeof value === "string" ? value : null;
+}
 
 export function EventsPage() {
   const resource = useAdminResource<EventsPayload>("/api/admin/events");
@@ -36,10 +44,13 @@ export function EventsPage() {
         ) : (
           <div className="divide-y">
             {events.map((event) => (
-              <article key={event.id} className="grid gap-2 px-4 py-3 sm:grid-cols-[130px_140px_minmax(0,1fr)_auto] sm:items-center sm:px-5">
-                <time className="font-mono text-[11px] text-muted-foreground">{formatDate(event.createdAt)}</time>
-                <span className="truncate font-mono text-[11px]">{event.accountName || event.accountId || "SYSTEM"}</span>
-                <div className="min-w-0">
+          <article key={event.id} className="grid gap-2 px-4 py-3 sm:grid-cols-[130px_140px_minmax(0,1fr)_auto] sm:items-center sm:px-5">
+            <time className="font-mono text-[11px] text-muted-foreground">{formatDate(event.createdAt)}</time>
+            <span className="inline-flex items-center gap-1.5 truncate font-mono text-[11px]">
+              {event.accountName || event.accountId || "SYSTEM"}
+              {poolTypeOf(event) ? <PoolTypeBadge poolType={poolTypeOf(event)} /> : null}
+            </span>
+            <div className="min-w-0">
                   <p className="truncate text-sm font-medium">{event.message || event.type || "系统事件"}</p>
                   {event.detail ? <p className="mt-0.5 truncate text-xs text-muted-foreground" title={event.detail}>{event.detail}</p> : null}
                 </div>
