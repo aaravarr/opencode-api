@@ -17,11 +17,33 @@ interface GitHubRelease {
   assets?: Array<{ name: string; browser_download_url: string }>;
 }
 
+// 镜像站根地址（如 https://githubfast.com）：把 github.com 的下载与页面链接改写到这里，加速 release 下载。
+// 注意：镜像站通常只代理 github.com 主站，不代理 api.github.com，因此 API 请求仍直连。
+function mirrorBase(): string {
+  return getSystemSettings().githubMirrorUrl.trim().replace(/\/$/, "");
+}
+
+function rewriteGithubUrl(url: string): string {
+  const mirror = mirrorBase();
+  if (!mirror) return url;
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname === "github.com") {
+      const target = new URL(mirror);
+      parsed.protocol = target.protocol;
+      parsed.host = target.host;
+      return parsed.toString();
+    }
+  } catch {
+    // URL 解析失败则原样返回
+  }
+  return url;
+}
+
+// API 请求直连 api.github.com；部署环境如需系统代理，可通过 https_proxy/http_proxy 环境变量配置。
 function dispatcher() {
-  // 优先用设置页面配置的 GitHub 代理地址，其次环境变量
-  const settings = getSystemSettings();
-  const proxy = settings.githubProxyUrl
-    || process.env.https_proxy || process.env.HTTPS_PROXY
+  const proxy =
+    process.env.https_proxy || process.env.HTTPS_PROXY
     || process.env.http_proxy || process.env.HTTP_PROXY;
   return proxy ? new ProxyAgent(proxy) : new Agent();
 }
@@ -45,8 +67,8 @@ export async function GET(): Promise<Response> {
     const asset = data.assets?.find((a) => a.name === ASSET_NAME);
     return Response.json({
       version: version || null,
-      downloadUrl: asset?.browser_download_url || FALLBACK_DOWNLOAD,
-      releaseUrl: data.html_url || FALLBACK_RELEASE,
+      downloadUrl: rewriteGithubUrl(asset?.browser_download_url || FALLBACK_DOWNLOAD),
+      releaseUrl: rewriteGithubUrl(data.html_url || FALLBACK_RELEASE),
       notes: data.body || null,
       checkedAt: new Date().toISOString(),
     });
@@ -55,8 +77,8 @@ export async function GET(): Promise<Response> {
     // version 为 null 表示无法确定最新版本，调用方可据此引导手动查看。
     return Response.json({
       version: null,
-      downloadUrl: FALLBACK_DOWNLOAD,
-      releaseUrl: FALLBACK_RELEASE,
+      downloadUrl: rewriteGithubUrl(FALLBACK_DOWNLOAD),
+      releaseUrl: rewriteGithubUrl(FALLBACK_RELEASE),
       notes: null,
       checkedAt: new Date().toISOString(),
     });

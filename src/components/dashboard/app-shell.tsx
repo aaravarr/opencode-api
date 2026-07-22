@@ -115,13 +115,6 @@ function Sidebar({ pathname, mobile = false }: { pathname: string; mobile?: bool
           {visibleItems.filter((item) => ["/events", "/users", "/settings"].includes(item.href)).map((item) => <NavItem key={item.href} item={item} pathname={pathname} mobile={mobile} />)}
         </div>
       </nav>
-
-      <div className="border-t p-3">
-        <div className="rounded-md border bg-[#fafafa] px-3 py-2.5">
-          <p className="text-xs font-medium">路由保护已开启</p>
-          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">未验证的账号默认不会进入候选池。</p>
-        </div>
-      </div>
     </div>
   );
 }

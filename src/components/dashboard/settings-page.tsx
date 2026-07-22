@@ -21,7 +21,7 @@ import { useAdminResource } from "./use-admin-resource";
 import type { LogsCleanupResponse } from "./types";
 
 interface Settings {
-  githubProxyUrl: string;
+  githubMirrorUrl: string;
   upstreamBaseUrl: string;
   upstreamRequestTimeoutMs: number;
   maintenanceEnabled: boolean;
@@ -163,15 +163,15 @@ export function SettingsPage() {
             description="Go API Key 调用的官方上游地址。"
           >
             <div className="grid gap-5 p-4 sm:p-5 lg:grid-cols-2">
-              <Field label="GitHub 代理地址" description="用于检查插件更新和下载。留空则直连 GitHub。如 http://127.0.0.1:7890">
+              <Field label="GitHub 镜像站地址" description="用于加速插件更新检查与下载。填镜像站根地址，如 https://githubfast.com；留空则直连 GitHub。">
                 <Input
                   type="url"
-                  value={form.githubProxyUrl}
-                  onChange={(e) => update("githubProxyUrl", e.target.value)}
-                  placeholder="留空则直连 GitHub"
+                  value={form.githubMirrorUrl}
+                  onChange={(e) => update("githubMirrorUrl", e.target.value)}
+                  placeholder="https://githubfast.com"
                 />
               </Field>
-              <Field label="请求上游地址">
+              <Field label="请求上游地址" description="Go API Key 调用的官方上游地址，仅支持 opencode.ai 官方 HTTPS 端点。">
                 <Input
                   type="url"
                   value={form.upstreamBaseUrl}
@@ -179,7 +179,7 @@ export function SettingsPage() {
                   required
                 />
               </Field>
-              <Field label="上游请求超时（毫秒）">
+              <Field label="上游请求超时（毫秒）" description="单次上游请求的超时上限，超时后中断连接。范围 1000-600000 毫秒。">
                 <Input
                   type="number"
                   min={1000}

@@ -3,7 +3,7 @@ import { getDatabase, type AppDatabase } from "./db";
 import { SecretVault } from "./crypto";
 
 export const SYSTEM_SETTING_KEYS = {
-  githubProxyUrl: "github_proxy_url",
+  githubMirrorUrl: "github_mirror_url",
   upstreamBaseUrl: "opencode_upstream_base_url",
   upstreamRequestTimeoutMs: "upstream_request_timeout_ms",
   maintenanceIntervalMs: "maintenance_interval_ms",
@@ -34,7 +34,7 @@ export type SystemSecretKey =
   (typeof SYSTEM_SECRET_KEYS)[keyof typeof SYSTEM_SECRET_KEYS];
 
 export interface SystemSettings {
-  githubProxyUrl: string;
+  githubMirrorUrl: string;
   upstreamBaseUrl: string;
   upstreamRequestTimeoutMs: number;
   maintenanceEnabled: boolean;
@@ -44,7 +44,7 @@ export interface SystemSettings {
 }
 
 export interface UpdateSystemSettingsInput {
-  githubProxyUrl?: string;
+  githubMirrorUrl?: string;
   upstreamBaseUrl?: string;
   upstreamRequestTimeoutMs?: number;
   maintenanceEnabled?: boolean;
@@ -67,7 +67,7 @@ export interface LogSettings {
 }
 
 const defaults: SystemSettings & LogSettings = {
-  githubProxyUrl: "",
+  githubMirrorUrl: "",
   upstreamBaseUrl: "https://opencode.ai/zen/go/v1",
   upstreamRequestTimeoutMs: 120_000,
   maintenanceEnabled: true,
@@ -92,8 +92,8 @@ export function initializeSystemSettings(db: AppDatabase): void {
   const vault = new SecretVault();
   db.transaction(() => {
     insert.run(
-      SYSTEM_SETTING_KEYS.githubProxyUrl,
-      JSON.stringify(defaults.githubProxyUrl),
+      SYSTEM_SETTING_KEYS.githubMirrorUrl,
+      JSON.stringify(defaults.githubMirrorUrl),
       0,
       now,
     );
@@ -192,7 +192,7 @@ export function getSystemSettings(
   db: AppDatabase = getDatabase(),
 ): SystemSettings {
   return {
-    githubProxyUrl: readPublic(db, SYSTEM_SETTING_KEYS.githubProxyUrl, defaults.githubProxyUrl),
+    githubMirrorUrl: readPublic(db, SYSTEM_SETTING_KEYS.githubMirrorUrl, defaults.githubMirrorUrl),
     upstreamBaseUrl: readPublic(
       db,
       SYSTEM_SETTING_KEYS.upstreamBaseUrl,
@@ -232,12 +232,17 @@ export function updateSystemSettings(
   db: AppDatabase = getDatabase(),
 ): SystemSettings {
   const entries: [string, string][] = [];
-  if (input.githubProxyUrl !== undefined) {
-    const proxy = input.githubProxyUrl.trim();
-    if (proxy) {
-      try { new URL(proxy) } catch { throw new Error("GitHub 代理地址不是有效 URL") }
+  if (input.githubMirrorUrl !== undefined) {
+    const mirror = input.githubMirrorUrl.trim().replace(/\/$/, "");
+    if (mirror) {
+      try {
+        const url = new URL(mirror);
+        if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("protocol");
+      } catch {
+        throw new Error("GitHub 镜像站地址不是有效 URL");
+      }
     }
-    entries.push([SYSTEM_SETTING_KEYS.githubProxyUrl, JSON.stringify(proxy)]);
+    entries.push([SYSTEM_SETTING_KEYS.githubMirrorUrl, JSON.stringify(mirror)]);
   }
   if (input.upstreamBaseUrl !== undefined)
     entries.push([
