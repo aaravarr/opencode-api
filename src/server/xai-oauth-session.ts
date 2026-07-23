@@ -11,7 +11,7 @@ import { randomBytes, createHash } from "node:crypto"
 // ─── Constants ───────────────────────────────────────────────────────────
 
 const XAI_OAUTH_AUTHORIZE_URL = "https://auth.x.ai/oauth2/authorize"
-const XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47a-8f10-8f6e-d3fc29b269ef"
+const XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
 const XAI_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access"
 
 const SESSION_TTL_MS = 30 * 60 * 1000 // 30 minutes
