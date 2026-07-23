@@ -85,13 +85,15 @@ class ProviderRegistry {
   }
 }
 
-let globalRegistry: ProviderRegistry | undefined
+const globalForRegistry = globalThis as typeof globalThis & {
+  __opencodeApiProviderRegistry?: ProviderRegistry
+}
 
 export function getProviderRegistry(): ProviderRegistry {
-  if (!globalRegistry) {
-    globalRegistry = new ProviderRegistry()
+  if (!globalForRegistry.__opencodeApiProviderRegistry) {
+    globalForRegistry.__opencodeApiProviderRegistry = new ProviderRegistry()
   }
-  return globalRegistry
+  return globalForRegistry.__opencodeApiProviderRegistry
 }
 
 export function getProvider(poolType: PoolType): Provider {
