@@ -110,7 +110,7 @@ export function OverviewPage() {
               ) : <EmptyState title="暂无请求" description="外部 API 收到请求后，最终服务账号和切号次数会显示在这里。" />}
             </Panel>
 
-            <Panel title="最近事件" description="额度恢复、Console 会话与订阅状态变化。">
+            <Panel title="最近事件" description="各 Provider 的额度、凭据、订阅与路由状态变化。">
               {resource.loading ? <LoadingTable rows={4} columns={3} /> : data?.recentEvents?.length ? (
                 <div className="divide-y">
                   {data.recentEvents.slice(0, 6).map((event) => (

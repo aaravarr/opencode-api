@@ -1,6 +1,13 @@
-import { describe, expect, it } from "vitest"
-import { parseImportInput } from "./import-jobs"
+import { beforeEach, describe, expect, it, vi } from "vitest"
+import { SecretVault } from "./crypto"
+import { createDatabase } from "./db"
+import { parseImportInput, startImportJobRunner } from "./import-jobs"
+import { AccountRepository } from "./repository"
 import { XAIGrokProvider } from "./providers/xai-grok"
+
+const encryptionKey = Buffer.alloc(32, 7).toString("base64")
+
+beforeEach(() => { process.env.TOKEN_ENCRYPTION_KEY = encryptionKey })
 
 describe("provider account imports", () => {
   it("解析 Sub2API Grok OAuth 账号", () => {
@@ -48,5 +55,41 @@ describe("xAI quota and account state", () => {
   it("识别 xAI permission-denied 永久封禁", () => {
     const body = JSON.stringify({ code: "permission-denied", error: "Access to the chat endpoint is denied. Please ensure you're using the correct credentials." })
     expect(provider.classifyError(403, body, new Headers())).toMatchObject({ errorType: "XAI_ACCOUNT_BANNED", permanentlyDisableAccount: true, shouldSwitchAccount: true })
+  })
+})
+
+describe("durable import runner", () => {
+  it("服务重启后保留已完成项，只恢复未完成项并继续更新进度", async () => {
+    const db = createDatabase(":memory:")
+    const timestamp = new Date().toISOString()
+    db.prepare("INSERT INTO users(id,username,username_normalized,display_name,role,status,password_hash,created_at,updated_at) VALUES (?,?,?,?,?,'ACTIVE',?,?,?)")
+      .run("import-owner", "import-owner", "import-owner", "Import owner", "USER", "hash", timestamp, timestamp)
+    const accounts = new AccountRepository("import-owner", db, new SecretVault(encryptionKey))
+    const existing = accounts.createProviderAccount({ name: "existing", poolType: "xai-grok", externalId: "existing" })
+    const seeds = [
+      { label: "already done", poolType: "xai-grok", accessToken: "one" },
+      { label: "resume me", poolType: "xai-grok", accessToken: "two" },
+    ]
+    db.prepare(`INSERT INTO import_jobs(id,owner_user_id,pool_type,format,status,total_items,processed_items,succeeded_items,current_step,payload_ciphertext,created_at,started_at,updated_at)
+      VALUES('resume-job','import-owner','xai-grok','cpa-json','RUNNING',2,1,1,'处理中',?,?,?,?)`)
+      .run(new SecretVault().encrypt(JSON.stringify(seeds)), timestamp, timestamp, timestamp)
+    db.prepare(`INSERT INTO import_job_items(id,job_id,item_index,label,status,step,account_id,created_at,updated_at)
+      VALUES('done-item','resume-job',0,'already done','COMPLETED','导入完成',?,?,?),
+      ('running-item','resume-job',1,'resume me','RUNNING','正在探测真实额度',NULL,?,?)`)
+      .run(existing.id, timestamp, timestamp, timestamp, timestamp)
+    const processItem = vi.fn(async (...args: unknown[]) => { void args; return existing.id })
+
+    startImportJobRunner(db, { processItem })
+    await vi.waitFor(() => {
+      expect(db.prepare("SELECT status,processed_items,succeeded_items,failed_items FROM import_jobs WHERE id='resume-job'").get())
+        .toEqual({ status: "COMPLETED", processed_items: 2, succeeded_items: 2, failed_items: 0 })
+    })
+    expect(processItem).toHaveBeenCalledTimes(1)
+    expect(processItem.mock.calls[0][2]).toBe(1)
+    expect(db.prepare("SELECT item_index,status,step FROM import_job_items WHERE job_id='resume-job' ORDER BY item_index").all()).toEqual([
+      { item_index: 0, status: "COMPLETED", step: "导入完成" },
+      { item_index: 1, status: "COMPLETED", step: "导入完成" },
+    ])
+    db.close()
   })
 })

@@ -31,7 +31,7 @@ export function EventsPage() {
       <PageIntro
         eyebrow="ACCOUNT EVENTS"
         title="账户事件"
-        description="聚合插件同步、Console 会话、订阅变化、额度阻塞和自动恢复记录。"
+        description="聚合各 Provider 的同步、凭据、订阅、额度阻塞和自动恢复记录。"
         actions={<Button variant="outline" size="sm" onClick={() => void resource.refresh()}><RefreshCw data-icon="inline-start" />刷新</Button>}
       />
       <Panel title="最近事件" description="事件来自本地状态变化，不会额外调用上游接口。">

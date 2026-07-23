@@ -298,7 +298,11 @@ async function importSeed(ownerUserId: string, jobId: string, index: number, ini
 const runnerGlobal = globalThis as typeof globalThis & { __accountImportJobs?: Set<string> }
 const activeJobs = (runnerGlobal.__accountImportJobs ??= new Set<string>())
 
-export async function runImportJob(jobId: string, db: AppDatabase = getDatabase()): Promise<void> {
+interface ImportRunnerOptions {
+  processItem?: (ownerUserId: string, jobId: string, index: number, seed: ImportSeed, db: AppDatabase) => Promise<string>
+}
+
+export async function runImportJob(jobId: string, db: AppDatabase = getDatabase(), options: ImportRunnerOptions = {}): Promise<void> {
   if (activeJobs.has(jobId)) return
   const claimed = db.prepare("UPDATE import_jobs SET status='RUNNING',started_at=COALESCE(started_at,?),current_step='正在准备导入',updated_at=? WHERE id=? AND status='QUEUED'")
     .run(nowIso(), nowIso(), jobId).changes
@@ -316,7 +320,7 @@ export async function runImportJob(jobId: string, db: AppDatabase = getDatabase(
         if (terminalItems.has(index)) continue
         try {
           updateItem(db, jobId, index, "RUNNING", "正在读取账号凭据")
-          const accountId = await importSeed(job.owner_user_id, jobId, index, seeds[index], db)
+          const accountId = await (options.processItem ?? importSeed)(job.owner_user_id, jobId, index, seeds[index], db)
           updateItem(db, jobId, index, "COMPLETED", "导入完成", accountId)
         } catch (cause) {
           const message = cause instanceof Error ? cause.message : "导入失败"
@@ -338,11 +342,11 @@ export async function runImportJob(jobId: string, db: AppDatabase = getDatabase(
   }
 }
 
-export function startImportJobRunner(db: AppDatabase = getDatabase()): void {
+export function startImportJobRunner(db: AppDatabase = getDatabase(), options: ImportRunnerOptions = {}): void {
   db.transaction(() => {
     db.prepare("UPDATE import_jobs SET status='QUEUED',current_step='服务重启，等待恢复',updated_at=? WHERE status='RUNNING'").run(nowIso())
     db.prepare("UPDATE import_job_items SET status='QUEUED',step='等待恢复',updated_at=? WHERE status='RUNNING'").run(nowIso())
   })()
   const jobs = db.prepare("SELECT id FROM import_jobs WHERE status='QUEUED' ORDER BY created_at").all() as { id: string }[]
-  for (const job of jobs) void runImportJob(job.id, db)
+  for (const job of jobs) void runImportJob(job.id, db, options)
 }

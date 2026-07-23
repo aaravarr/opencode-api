@@ -6,9 +6,10 @@
  * id). The free tier enforces a rolling 24h token window with a 1,000,000
  * token limit, surfaced via the x-ratelimit-* response headers.
  *
- * Upstream inference is served from https://api.x.ai/v1 (/responses,
- * /chat/completions, /images/generations). Billing/subscription metadata is
- * served from https://cli-chat-proxy.grok.com/v1/billing, but for free-tier
+ * OAuth/free-tier inference is served from https://cli-chat-proxy.grok.com/v1.
+ * Direct API-key accounts use api.x.ai, but that endpoint rejects CLI OAuth
+ * bearer tokens. Billing/subscription metadata is also served from the CLI
+ * gateway, but for free-tier
  * accounts we rely on the per-response x-ratelimit-* headers for quota, so
  * billing probing is best-effort and only used to detect the subscription tier
  * when the headers are absent.
@@ -281,7 +282,9 @@ export class XAIGrokProvider implements Provider {
         "x-grok-client-mode": "interactive",
         "user-agent": GROK_CLI_USER_AGENT,
       },
-      body: JSON.stringify({ model: "grok-4.5", input: "hi", stream: false, max_output_tokens: 1 }),
+      // Match sub2api's proven active-probe shape. The CLI gateway streams the
+      // smallest valid response and exposes the quota snapshot in headers.
+      body: JSON.stringify({ model: "grok-4.5", input: "hi", stream: true }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     })
     const windows = this.extractQuotaFromResponse(resp.headers) ?? []

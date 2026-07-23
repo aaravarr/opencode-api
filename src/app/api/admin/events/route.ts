@@ -15,6 +15,7 @@
  }
  
  const MESSAGE_BY_TYPE: Record<string, string> = {
+   ACCOUNT_QUOTA_BLOCKED: "额度耗尽，已切换服务账号",
    GO_QUOTA_BLOCKED: "额度耗尽，已切换服务账号",
    ROUTING_PREFERENCE_CHANGED: "优先账号已变更",
    ROUTING_ACCOUNT_SELECTED: "已选择服务账号",

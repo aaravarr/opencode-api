@@ -301,11 +301,11 @@ function AddRuleDialog({ open, onOpenChange, adminFetch, onCreated }: {
   onCreated: () => void;
 }) {
   const [patterns, setPatterns] = useState("");
-  const [priority, setPriority] = useState<string[]>(["opencode-go", "openai-cpa"]);
+  const [priority, setPriority] = useState<string[]>([...POOL_OPTIONS]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  function reset() { setPatterns(""); setPriority(["opencode-go", "openai-cpa"]); setError(null); }
+  function reset() { setPatterns(""); setPriority([...POOL_OPTIONS]); setError(null); }
 
   async function handleSubmit() {
     const patternList = patterns.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);

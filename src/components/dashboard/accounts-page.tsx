@@ -489,7 +489,7 @@ function Sub2ApiImportDialog({ open, poolType, onOpenChange, onCreated }: { open
   // Merge a parsed Sub2API payload (or array) into whatever is currently in
   // the textarea. The textarea stays the single source of truth so users can
   // still hand-edit after dropping files; multiple files accumulate.
-  function mergeIntoTextarea(parsed: unknown, label: string) {
+  function accountsFromPayload(parsed: unknown, label: string): { accounts: unknown[]; extras: Record<string, unknown> } {
     let incomingAccounts: unknown;
     let incomingExtras: Record<string, unknown> = {};
     if (Array.isArray(parsed)) {
@@ -502,6 +502,11 @@ function Sub2ApiImportDialog({ open, poolType, onOpenChange, onCreated }: { open
     } else {
       throw new Error(`${label}: JSON 顶层不是对象且不含 accounts 数组，也不是数组`);
     }
+    return { accounts: incomingAccounts as unknown[], extras: incomingExtras };
+  }
+
+  function mergeIntoTextarea(payloads: Array<{ parsed: unknown; label: string }>) {
+    const incoming = payloads.map(({ parsed, label }) => accountsFromPayload(parsed, label));
     let existing: Record<string, unknown> = {};
     try {
       const cur = jsonText.trim() ? JSON.parse(jsonText) : null;
@@ -509,8 +514,8 @@ function Sub2ApiImportDialog({ open, poolType, onOpenChange, onCreated }: { open
         existing = { ...(cur as Record<string, unknown>) };
       }
     } catch { /* current textarea not valid JSON — start fresh */ }
-    const mergedAccounts = [...((existing.accounts as unknown[]) ?? []), ...(incomingAccounts as unknown[])];
-    const merged = { ...existing, ...incomingExtras, accounts: mergedAccounts };
+    const mergedAccounts = [...((existing.accounts as unknown[]) ?? []), ...incoming.flatMap((item) => item.accounts)];
+    const merged = { ...existing, ...Object.assign({}, ...incoming.map((item) => item.extras)), accounts: mergedAccounts };
     setJsonText(JSON.stringify(merged, null, 2));
     setDetectedAccounts(mergedAccounts.length);
   }
@@ -519,20 +524,20 @@ function Sub2ApiImportDialog({ open, poolType, onOpenChange, onCreated }: { open
     setError(null);
     const list = Array.from(files).filter((f) => f.type === "application/json" || f.name.toLowerCase().endsWith(".json") || f.type === "");
     if (!list.length) { setError("请选择 .json 文件"); return; }
-    let ok = 0;
+    const parsedFiles: Array<{ parsed: unknown; label: string }> = [];
     let firstErr: string | null = null;
     for (const file of list) {
       try {
         const text = await file.text();
         const parsed = JSON.parse(text);
-        mergeIntoTextarea(parsed, file.name);
-        ok++;
+        parsedFiles.push({ parsed, label: file.name });
       } catch (cause) {
         const msg = cause instanceof Error ? cause.message : "解析失败";
         if (!firstErr) firstErr = `${file.name}: ${msg}`;
       }
     }
-    setFileCount((c) => c + ok);
+    if (parsedFiles.length) mergeIntoTextarea(parsedFiles);
+    setFileCount((c) => c + parsedFiles.length);
     if (firstErr) setError(firstErr);
   }
 
@@ -695,7 +700,18 @@ function XaiSsoImportDialog({ format, open, onOpenChange, onCreated }: { format:
             <div>
               <input ref={fileRef} type="file" accept=".json,.jsonl,application/json" multiple className="hidden" onChange={(event) => {
                 const files = Array.from(event.target.files ?? []);
-                if (files.length) void Promise.all(files.map((file) => file.text())).then((texts) => setTokenText(texts.length === 1 ? texts[0] : `[${texts.join(",")}]`));
+                if (files.length) void Promise.all(files.map(async (file) => {
+                  const text = (await file.text()).replace(/^\uFEFF/, "").trim();
+                  try {
+                    const parsed = JSON.parse(text) as unknown;
+                    return Array.isArray(parsed) ? parsed : [parsed];
+                  } catch {
+                    return text.split(/\r?\n/).map((line) => line.trim().replace(/,$/, "")).filter(Boolean).map((line) => JSON.parse(line) as unknown);
+                  }
+                })).then((groups) => {
+                  setError(null);
+                  setTokenText(JSON.stringify(groups.flat(), null, 2));
+                }).catch(() => setError("文件中包含无效的 JSON / JSONL"));
                 event.currentTarget.value = "";
               }} />
               <Button type="button" variant="outline" size="sm" onClick={() => fileRef.current?.click()}><FileUp />选择 JSON / JSONL 文件</Button>

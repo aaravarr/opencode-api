@@ -98,9 +98,16 @@ export class RoutingService {
       // Latest stored usage_percent for each account (any kind). Used to
       // balance load across rolling-window pool accounts instead of always
       // picking the lowest ordinal.
-      const usageRows = this.db.prepare(`SELECT account_id, MAX(last_observed_at) AS latest, usage_percent FROM quota_windows
-        WHERE owner_user_id = ? GROUP BY account_id`)
-        .all(this.ownerUserId) as { account_id: string; usage_percent: number | null }[]
+      const usageRows = this.db.prepare(`SELECT quota.account_id, quota.usage_percent
+        FROM quota_windows quota
+        INNER JOIN (
+          SELECT account_id, MAX(last_observed_at) AS latest
+          FROM quota_windows
+          WHERE owner_user_id = ?
+          GROUP BY account_id
+        ) observed ON observed.account_id = quota.account_id AND observed.latest = quota.last_observed_at
+        WHERE quota.owner_user_id = ?`)
+        .all(this.ownerUserId, this.ownerUserId) as { account_id: string; usage_percent: number | null }[]
       const usagePct = new Map<string, number>()
       for (const row of usageRows) {
         if (row.usage_percent != null) usagePct.set(row.account_id, Number(row.usage_percent))
@@ -139,9 +146,7 @@ export class RoutingService {
       // burning each seat to 100% before moving on. Go/OpenAI pools keep the
       // stable ordinal ordering.
       const usageAwareCompare = (a: AccountRecord, b: AccountRecord): number => {
-        const aRolling = isRollingDayPool(a.poolType)
-        const bRolling = isRollingDayPool(b.poolType)
-        if (aRolling || bRolling) {
+        if (a.poolType === b.poolType && isRollingDayPool(a.poolType)) {
           const aUsage = usagePct.get(a.id) ?? 0
           const bUsage = usagePct.get(b.id) ?? 0
           if (aUsage !== bUsage) return aUsage - bUsage
@@ -167,10 +172,6 @@ export class RoutingService {
         : [...eligible].sort(usageAwareCompare)
       let selected = state.preferredAccountId ? byId.get(state.preferredAccountId) : undefined
       if (selected && poolTypePriority && poolTypePriority.length > 0 && selected.poolType !== poolTypePriority[0]) selected = undefined
-      if (!selected) {
-        selected = state.currentAccountId ? byId.get(state.currentAccountId) : undefined
-        if (selected && poolTypePriority && poolTypePriority.length > 0 && selected.poolType !== poolTypePriority[0]) selected = undefined
-      }
       // Per-pool-type preferred account
       if (!selected && poolTypePriority && poolTypePriority.length > 0) {
         const poolPref = poolPrefs[poolTypePriority[0] as PoolType]
@@ -181,9 +182,30 @@ export class RoutingService {
           if (prefId && byId.has(prefId)) { selected = byId.get(prefId); break }
         }
       }
+      // A rolling-window pool must not stick to the previous account: doing
+      // so would bypass the usage ordering above and keep burning one xAI
+      // account until it reaches 100%. Explicit user preferences still win.
       if (!selected) {
-        const anchor = all.find((account) => account.id === (state.currentAccountId ?? state.preferredAccountId))?.ordinal ?? -1
-        selected = ordered.find((account) => account.ordinal > anchor) ?? ordered[0]
+        const current = state.currentAccountId ? byId.get(state.currentAccountId) : undefined
+        if (current && !isRollingDayPool(current.poolType)) selected = current
+        if (selected && poolTypePriority && poolTypePriority.length > 0 && selected.poolType !== poolTypePriority[0]) selected = undefined
+      }
+      if (!selected) {
+        const currentPool = all.find((account) => account.id === state.currentAccountId)?.poolType
+        const priorityPool = poolTypePriority?.[0] as PoolType | undefined
+        const rollingPool = currentPool && isRollingDayPool(currentPool)
+          ? currentPool
+          : priorityPool && isRollingDayPool(priorityPool)
+            ? priorityPool
+            : eligible.every((account) => isRollingDayPool(account.poolType))
+              ? eligible[0].poolType
+              : null
+        if (rollingPool) {
+          selected = ordered.filter((account) => account.poolType === rollingPool).sort(usageAwareCompare)[0]
+        } else {
+          const anchor = all.find((account) => account.id === (state.currentAccountId ?? state.preferredAccountId))?.ordinal ?? -1
+          selected = ordered.find((account) => account.ordinal > anchor) ?? ordered[0]
+        }
       }
 
       const leaseId = randomUUID()
@@ -232,7 +254,7 @@ export class RoutingService {
         this.db.prepare("UPDATE routing_state SET current_account_id=NULL,cursor_version=cursor_version+1,updated_at=? WHERE owner_user_id=?")
           .run(timestamp, this.ownerUserId)
       }
-      this.event("GO_QUOTA_BLOCKED", "WARN", accountId, null, { kind, resetAt, retryAfterSeconds: retry })
+      this.event("ACCOUNT_QUOTA_BLOCKED", "WARN", accountId, null, { kind, resetAt, retryAfterSeconds: retry })
     })()
   }
 

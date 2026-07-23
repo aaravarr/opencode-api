@@ -14,10 +14,10 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: "OpenCode Go Console",
-    template: "%s | OpenCode Go Console",
+    default: "Provider Gateway Console",
+    template: "%s | Provider Gateway Console",
   },
-  description: "OpenCode Go 账号池、额度与智能路由管理控制台",
+  description: "多 Provider 账号池、额度、导入任务与智能路由管理控制台",
 };
 
 export default function RootLayout({

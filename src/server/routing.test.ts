@@ -73,4 +73,53 @@ describe("routing", () => {
     expect(() => routing.select("request-2", "responses", new Set([own]))).toThrowError(NoEligibleAccountError)
     expect(otherRepo.get(other.id)?.ownerUserId).toBe("user-2")
   })
+
+  it("xAI 滚动号池每次按真实剩余额度重新选择，不被当前账号粘住", () => {
+    const { db, accounts, routing } = make()
+    const first = accounts.createProviderAccount({ name: "xAI first", poolType: "xai-grok", externalId: "xai-first" })
+    const second = accounts.createProviderAccount({ name: "xAI second", poolType: "xai-grok", externalId: "xai-second" })
+    const observedAt = new Date().toISOString()
+    const writeUsage = db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at,limit_value,remaining_value)
+      VALUES(?,?,'ROLLING_24H',?,?,'UPSTREAM_HEADER',?,1000000,?)
+      ON CONFLICT(owner_user_id,account_id,kind) DO UPDATE SET usage_percent=excluded.usage_percent,
+      last_observed_at=excluded.last_observed_at,remaining_value=excluded.remaining_value`)
+    writeUsage.run(ownerUserId, first.id, 10, null, observedAt, 900_000)
+    writeUsage.run(ownerUserId, second.id, 80, null, observedAt, 200_000)
+
+    const initial = routing.select("xai-request-1", "responses", new Set())
+    expect(initial.account.id).toBe(first.id)
+    routing.releaseLease(initial.leaseId)
+
+    const later = new Date(Date.now() + 1000).toISOString()
+    writeUsage.run(ownerUserId, first.id, 95, null, later, 50_000)
+    writeUsage.run(ownerUserId, second.id, 40, null, later, 600_000)
+    const rebalanced = routing.select("xai-request-2", "responses", new Set())
+    expect(rebalanced.account.id).toBe(second.id)
+  })
+
+  it("xAI 手动优先账号仍覆盖用量均衡", () => {
+    const { db, accounts, routing } = make()
+    const preferred = accounts.createProviderAccount({ name: "preferred", poolType: "xai-grok", externalId: "xai-preferred" })
+    const lowerUsage = accounts.createProviderAccount({ name: "lower", poolType: "xai-grok", externalId: "xai-lower" })
+    const observedAt = new Date().toISOString()
+    db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at)
+      VALUES(?,?,'ROLLING_24H',90,NULL,'UPSTREAM_HEADER',?),(?,?,'ROLLING_24H',5,NULL,'UPSTREAM_HEADER',?)`)
+      .run(ownerUserId, preferred.id, observedAt, ownerUserId, lowerUsage.id, observedAt)
+    routing.setPreferred(preferred.id)
+    expect(routing.select("xai-preferred-request", "responses", new Set()).account.id).toBe(preferred.id)
+  })
+
+  it("混合号池时在当前 xAI 号池内均衡，不被其他 Provider 的百分比干扰", () => {
+    const { db, accounts, routing, add } = make()
+    add("go-account")
+    const highUsage = accounts.createProviderAccount({ name: "xAI high", poolType: "xai-grok", externalId: "xai-high" })
+    const lowUsage = accounts.createProviderAccount({ name: "xAI low", poolType: "xai-grok", externalId: "xai-low" })
+    const observedAt = new Date().toISOString()
+    db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at)
+      VALUES(?,?,'ROLLING_24H',85,NULL,'UPSTREAM_HEADER',?),(?,?,'ROLLING_24H',15,NULL,'UPSTREAM_HEADER',?)`)
+      .run(ownerUserId, highUsage.id, observedAt, ownerUserId, lowUsage.id, observedAt)
+    routing.setPreferred(highUsage.id)
+    routing.setPreferred(null)
+    expect(routing.select("mixed-pool-request", "responses", new Set()).account.id).toBe(lowUsage.id)
+  })
 })
