@@ -31,6 +31,7 @@ function render(model) {
   $("connection-detail").hidden = !runtime.workspaceId;
   $("google-login").disabled = !config.apiKeyConfigured;
   $("github-login").disabled = !config.apiKeyConfigured;
+  $("xai-login").disabled = !config.apiKeyConfigured;
 }
 
 async function refresh() {
@@ -102,6 +103,23 @@ $("sync-now").addEventListener("click", async () => {
   try { await send("DETECT_LOGIN"); render(await send("SUBMIT_CONNECTION")); }
   catch (error) { status.textContent = error.message; }
 });
+
+// ---- xAI Grok SSO ----
+$("xai-login").addEventListener("click", async () => {
+  const ssoToken = $("xai-sso-token").value.trim();
+  if (!ssoToken) { $("xai-status").textContent = "请粘贴 SSO Token"; return; }
+  $("xai-status").textContent = "正在写入 Cookie 并发起授权…";
+  $("xai-login").disabled = true;
+  try {
+    await send("XAI_SSO_LOGIN", { ssoToken });
+    $("xai-status").textContent = "授权页面已打开，请在页面中完成授权（通常会自动完成）。";
+  } catch (error) {
+    $("xai-status").textContent = error.message;
+  } finally {
+    $("xai-login").disabled = false;
+  }
+});
+
 $("open-options").addEventListener("click", () => void send("OPEN_OPTIONS").then(() => window.close()));
 $("extension-version").textContent = chrome.runtime.getManifest().version;
 void refresh();
