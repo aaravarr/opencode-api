@@ -57,8 +57,9 @@ export function AccountsPage() {
   const [poolFilter, setPoolFilter] = useState<string>("all");
  const [selected, setSelected] = useState<Account | null>(null);
  const [connectorOpen, setConnectorOpen] = useState(false);
- const [importOpen, setImportOpen] = useState(false);
- const [busyId, setBusyId] = useState<string | null>(null);
+const [importOpen, setImportOpen] = useState(false);
+const [ssoImportOpen, setSsoImportOpen] = useState(false);
+const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const accounts = resource.data?.accounts ?? [];
   const term = query.trim().toLowerCase();
@@ -173,12 +174,15 @@ export function AccountsPage() {
                 </a>
               </Button>
             ) : null}
-            <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
-              <Upload data-icon="inline-start" />导入 Sub2API JSON
+           <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
+             <Upload data-icon="inline-start" />导入 Sub2API JSON
+           </Button>
+            <Button variant="outline" size="sm" onClick={() => setSsoImportOpen(true)}>
+              <KeyRound data-icon="inline-start" />导入 xAI SSO
             </Button>
-            <Button size="sm" onClick={() => setConnectorOpen(true)}>
-              <Puzzle data-icon="inline-start" />连接 Go 账号
-            </Button>
+           <Button size="sm" onClick={() => setConnectorOpen(true)}>
+             <Puzzle data-icon="inline-start" />连接 Go 账号
+           </Button>
           </div>
         }
       />
@@ -307,8 +311,9 @@ export function AccountsPage() {
       </Panel>
 
       <ConnectorSheet open={connectorOpen} onOpenChange={setConnectorOpen} downloadInfo={downloadInfo} />
-      <Sub2ApiImportDialog open={importOpen} onOpenChange={setImportOpen} onCreated={() => void resource.refresh()} />
-      <AccountDetailSheet
+     <Sub2ApiImportDialog open={importOpen} onOpenChange={setImportOpen} onCreated={() => void resource.refresh()} />
+      <XaiSsoImportDialog open={ssoImportOpen} onOpenChange={setSsoImportOpen} onCreated={() => void resource.refresh()} />
+     <AccountDetailSheet
         account={selected}
         onOpenChange={(open) => { if (!open) setSelected(null); }}
         onPreferred={setPreferred}
@@ -627,6 +632,99 @@ function Sub2ApiImportDialog({ open, onOpenChange, onCreated }: { open: boolean;
                   <ul className="mt-1 space-y-0.5 text-muted-foreground">
                     {result.accounts.map((a) => (
                       <li key={a.id}>{a.name} · {a.poolType}</li>
+                    ))}
+                  </ul>
+                </details>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+        <DialogFooter className="mb-0 border-t bg-[#fafafa] px-5 py-4">
+          <Button variant="outline" onClick={() => { reset(); onOpenChange(false); }}>取消</Button>
+          <Button onClick={() => void handleSubmit()} disabled={submitting}>
+            {submitting ? "正在导入" : "开始导入"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function XaiSsoImportDialog({ open, onOpenChange, onCreated }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: () => void }) {
+  const { adminFetch } = useAdmin();
+  const [tokenText, setTokenText] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<{ created: { index: number; name: string; email: string; accountId: string }[]; failed: { index: number; error: string }[] } | null>(null);
+
+  function reset() {
+    setTokenText(""); setError(null); setResult(null);
+  }
+
+  async function handleSubmit() {
+    const tokens = tokenText
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    if (!tokens.length) { setError("请至少粘贴一个 SSO Token"); return; }
+    setSubmitting(true); setError(null); setResult(null);
+    try {
+      const response = await adminFetch("/api/admin/accounts/sso-import", {
+        method: "POST",
+        body: JSON.stringify({ ssoTokens: tokens }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(payload?.error?.message || payload?.message || "SSO 导入失败");
+      setResult({
+        created: payload?.created ?? [],
+        failed: payload?.failed ?? [],
+      });
+      if (!payload?.failed?.length) { setTokenText(""); }
+      onCreated();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "SSO 导入失败");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => { if (!next) reset(); onOpenChange(next); }}>
+      <DialogContent className="max-h-[85dvh] gap-0 overflow-hidden p-0 sm:max-w-lg">
+        <DialogHeader className="border-b px-5 py-4">
+          <DialogTitle>导入 xAI SSO</DialogTitle>
+          <DialogDescription>粘贴 Grok Web 的 SSO Key，系统自动走 xAI Device Flow 转换为 OAuth 凭据并批量导入。</DialogDescription>
+        </DialogHeader>
+        <div className="max-h-[calc(85dvh-160px)] space-y-4 overflow-y-auto px-5 py-6">
+          <Textarea
+            value={tokenText}
+            onChange={(e) => setTokenText(e.target.value)}
+            placeholder={"每行一个 SSO Token（eyJ... 格式）"}
+            className="min-h-[200px] resize-y rounded-md font-mono text-xs leading-5"
+            spellCheck={false}
+          />
+          <p className="text-[11px] leading-4 text-muted-foreground">
+            粘贴 Grok Web SSO Key，系统会自动走 xAI Device Flow 并转换为 OAuth 凭据。每行一个，支持批量导入，3 路并发。
+          </p>
+          {error ? <div className="rounded-md border border-destructive/20 bg-destructive/5 px-3.5 py-2.5 text-xs text-destructive" role="alert">{error}</div> : null}
+          {result ? (
+            <div className="space-y-2 rounded-md border bg-[#fafafa] px-4 py-3 text-xs">
+              <p className="font-medium text-emerald-600">
+                成功导入 {result.created.length} 个账号{result.failed.length ? `，失败 ${result.failed.length} 个` : ""}。
+              </p>
+              {result.failed.length ? (
+                <ul className="space-y-1 text-destructive">
+                  {result.failed.map((f, i) => (
+                    <li key={i} className="break-all">#{f.index}：{f.error}</li>
+                  ))}
+                </ul>
+              ) : null}
+              {result.created.length ? (
+                <details className="pt-1">
+                  <summary className="cursor-pointer text-muted-foreground">已导入账号（{result.created.length}）</summary>
+                  <ul className="mt-1 space-y-0.5 text-muted-foreground">
+                    {result.created.map((c) => (
+                      <li key={c.index}>#{c.index} · {c.name}{c.email ? ` · ${c.email}` : ""}</li>
                     ))}
                   </ul>
                 </details>

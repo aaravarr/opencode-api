@@ -1,5 +1,4 @@
 import { captureAndSubmit } from "./lib/connector.js";
-import { writeSsoCookies, startXaiOAuth, submitXaiCallback } from "./lib/xai-connector.js";
 import {
   CONFIG_STORAGE_KEY,
   configReady,
@@ -20,11 +19,6 @@ import {
 const OPENCODE_AUTHORIZE_URL = "https://opencode.ai/auth/authorize?continue=/auth&ocg_flow=1";
 const LOGIN_WINDOW = Object.freeze({ width: 520, height: 720 });
 let submissionInFlight = null;
-
-// ---- xAI Grok SSO / OAuth ----
-const XAI_OAUTH_REDIRECT_URI = "http://127.0.0.1:56121/callback";
-const XAI_CALLBACK_URL_PREFIX = "http://127.0.0.1:56121/callback";
-let xaiCallbackListenerActive = false;
 
 async function loadConfig() {
   const result = await chrome.storage.local.get(CONFIG_STORAGE_KEY);
@@ -329,10 +323,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         return { ok: true };
       case "DETECT_BACKEND_TAB":
         return detectBackendTab();
-      case "XAI_SSO_LOGIN":
-        return handleXaiSsoLogin(message.payload);
-      case "XAI_OAUTH_CALLBACK":
-        return handleXaiOAuthCallback(message.payload);
       default:
         throw new Error("未知的插件操作");
     }
@@ -376,102 +366,4 @@ async function detectBackendTab() {
   } catch {
     return { detected: false, backendUrl: null, configured: false, sameAsConfigured: false };
   }
-}
-
-async function handleXaiSsoLogin({ ssoToken }) {
-  // 1. 写入 SSO cookie 到 .x.ai 和 .grok.com
-  const cookieResult = await writeSsoCookies(ssoToken);
-  if (!cookieResult.ok) throw new Error(cookieResult.message ?? "SSO Cookie 写入失败");
-
-  // 2. 获取配置
-  const config = await loadConfig();
-  if (!configReady(config)) throw new Error("请先完成后端配置");
-
-  // 3. 调用后端 start API
-  const result = await startXaiOAuth({
-    backendUrl: config.backendUrl,
-    apiKey: config.apiKey,
-    redirectUri: XAI_OAUTH_REDIRECT_URI,
-  });
-
-  // 4. 打开授权 URL
-  await chrome.tabs.create({ url: result.authUrl, active: true });
-
-  // 5. 存储 sessionId 供 callback 使用，并启动 tab 监听
-  await chrome.storage.session.set({
-    xaiOAuthSessionId: result.sessionId,
-    xaiOAuthState: result.state,
-    xaiOAuthPending: true,
-  });
-
-  if (!xaiCallbackListenerActive) {
-    xaiCallbackListenerActive = true;
-    chrome.tabs.onUpdated.addListener(handleXaiCallbackTab);
-  }
-
-  return { ok: true, sessionId: result.sessionId, authUrl: result.authUrl };
-}
-
-async function handleXaiCallbackTab(tabId, changeInfo, tab) {
-  const url = changeInfo.url ?? tab?.url;
-  if (!url || !url.startsWith(XAI_CALLBACK_URL_PREFIX)) return;
-
-  // 确认是我们发起的流程
-  const sessionData = await chrome.storage.session.get([
-    "xaiOAuthSessionId",
-    "xaiOAuthState",
-    "xaiOAuthPending",
-  ]);
-  if (!sessionData.xaiOAuthPending) return;
-
-  // 提取 code 和 state
-  const parsed = new URL(url);
-  const code = parsed.searchParams.get("code");
-  const state = parsed.searchParams.get("state");
-
-  // 关闭回调页
-  try { await chrome.tabs.remove(tabId); } catch { /* ignore */ }
-
-  if (!code) return;
-
-  // 在后端完成 OAuth 交换
-  const config = await loadConfig();
-  if (!configReady(config)) return;
-
-  try {
-    const result = await submitXaiCallback({
-      backendUrl: config.backendUrl,
-      apiKey: config.apiKey,
-      sessionId: sessionData.xaiOAuthSessionId,
-      code,
-      state: state ?? sessionData.xaiOAuthState,
-    });
-    await chrome.storage.session.set({ xaiOAuthResult: result });
-  } catch (error) {
-    await chrome.storage.session.set({
-      xaiOAuthResult: { ok: false, error: error instanceof Error ? error.message : String(error) },
-    });
-  } finally {
-    await chrome.storage.session.remove([
-      "xaiOAuthSessionId",
-      "xaiOAuthState",
-      "xaiOAuthPending",
-    ]);
-    chrome.tabs.onUpdated.removeListener(handleXaiCallbackTab);
-    xaiCallbackListenerActive = false;
-  }
-}
-
-// popup 主动查询授权结果时调用
-async function handleXaiOAuthCallback(_payload) {
-  const result = await chrome.storage.session.get("xaiOAuthResult");
-  if (result.xaiOAuthResult) {
-    await chrome.storage.session.remove("xaiOAuthResult");
-    if (!result.xaiOAuthResult.ok) throw new Error(result.xaiOAuthResult.error ?? "授权失败");
-    return result.xaiOAuthResult;
-  }
-  // 流程仍在进行中
-  const pending = await chrome.storage.session.get("xaiOAuthPending");
-  if (pending.xaiOAuthPending) throw new Error("授权流程仍在进行中，请稍后查询。");
-  throw new Error("没有正在进行的 xAI 授权流程。");
 }

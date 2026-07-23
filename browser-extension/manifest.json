@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "OpenCode API Connector",
-  "version": "0.4.0",
-  "description": "统一连接器，支持 OpenCode Go、xAI Grok 等多种账号池的自动录入。",
+  "name": "OpenCode Go Connector",
+  "version": "0.3.0",
+  "description": "完成 OpenCode Google 登录并连接到 OpenCode Go Router。",
   "permissions": [
     "storage",
     "tabs",
@@ -11,11 +11,7 @@
   ],
   "host_permissions": [
     "https://opencode.ai/*",
-    "https://auth.opencode.ai/*",
-    "https://*.x.ai/*",
-    "https://x.ai/*",
-    "https://*.grok.com/*",
-    "https://grok.com/*"
+    "https://auth.opencode.ai/*"
   ],
   "optional_host_permissions": [
     "http://*/*",
@@ -27,7 +23,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "OpenCode API Connector"
+    "default_title": "OpenCode Go Connector"
   },
   "options_page": "options.html",
   "content_scripts": [
@@ -38,15 +34,6 @@
       "js": [
         "google-login.js",
         "page-overlay.js"
-      ],
-      "run_at": "document_idle"
-    },
-    {
-      "matches": [
-        "https://auth.x.ai/*"
-      ],
-      "js": [
-        "xai-auto-authorize.js"
       ],
       "run_at": "document_idle"
     },
