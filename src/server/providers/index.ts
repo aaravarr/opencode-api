@@ -5,11 +5,11 @@ import { XAIGrokProvider } from "./xai-grok"
 
 // Register all built-in providers. This runs once on first import.
 
-let initialized = false
+const globalInit = globalThis as typeof globalThis & { __opencodeApiProvidersInitialized?: boolean }
 
 export function ensureProvidersRegistered(): void {
-  if (initialized) return
-  initialized = true
+  if (globalInit.__opencodeApiProvidersInitialized) return
+  globalInit.__opencodeApiProvidersInitialized = true
   const registry = getProviderRegistry()
   registry.register(new OpenCodeGoProvider())
   registry.register(new OpenAICPAProvider("openai-cpa"))
