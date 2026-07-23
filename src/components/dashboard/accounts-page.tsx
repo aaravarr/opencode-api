@@ -43,6 +43,7 @@ const POOL_FILTERS = [
   { key: "opencode-go", label: "OpenCode Go" },
   { key: "openai-cpa", label: "OpenAI CPA" },
   { key: "openai-oauth", label: "OpenAI OAuth" },
+  { key: "xai-grok", label: "xAI Grok" },
 ] as const;
 
 function poolOf(account: Account) {
@@ -551,7 +552,7 @@ function Sub2ApiImportDialog({ open, onOpenChange, onCreated }: { open: boolean;
       <DialogContent className="max-h-[85dvh] gap-0 overflow-hidden p-0 sm:max-w-lg">
         <DialogHeader className="border-b px-5 py-4">
         <DialogTitle>导入 Sub2API JSON</DialogTitle>
-        <DialogDescription>粘贴 Sub2API 导出的 JSON，自动识别 platform=openai 的账号并导入。</DialogDescription>
+        <DialogDescription>粘贴 Sub2API 导出的 JSON，自动识别 platform=openai（CPA/OAuth）和 platform=grok（xAI）的账号并导入。</DialogDescription>
       </DialogHeader>
         <div className="max-h-[calc(85dvh-160px)] space-y-4 overflow-y-auto px-5 py-6">
           {/* 拖拽 / 选择 / 粘贴文件区域 */}
@@ -607,7 +608,7 @@ function Sub2ApiImportDialog({ open, onOpenChange, onCreated }: { open: boolean;
             spellCheck={false}
           />
           <p className="text-[11px] leading-4 text-muted-foreground">
-            也可以直接粘贴 Sub2API 导出的完整 JSON。系统会自动识别 platform=openai 的账号并批量导入，其余账号将被跳过。支持一次导入多个账号。
+            也可以直接粘贴 Sub2API 导出的完整 JSON。系统会自动识别 platform=openai（CPA/OAuth）和 platform=grok（xAI）的账号并批量导入，其余账号将被跳过。支持一次导入多个账号。
           </p>
           {error ? <div className="rounded-md border border-destructive/20 bg-destructive/5 px-3.5 py-2.5 text-xs text-destructive" role="alert">{error}</div> : null}
           {result ? (

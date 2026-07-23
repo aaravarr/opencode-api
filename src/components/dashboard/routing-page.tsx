@@ -24,7 +24,7 @@ interface AccountsPayload {
 }
 interface ModelRoutingPayload { rules?: ModelRouteRule[] }
 
-const POOL_OPTIONS = ["opencode-go", "openai-cpa", "openai-oauth"] as const;
+const POOL_OPTIONS = ["opencode-go", "openai-cpa", "openai-oauth", "xai-grok"] as const;
 
 export function RoutingPage() {
   const routingResource = useAdminResource<RoutingPayload>("/api/admin/routing");
@@ -37,7 +37,7 @@ export function RoutingPage() {
   // per-pool-type 首选账号：从 routing data 取当前配置与号池类型列表
   const rawPoolTypes = routing?.poolTypes ?? accountsResource.data?.poolTypes ?? Array.from(new Set(accounts.map((a) => a.poolType || "opencode-go"))) ?? [...POOL_OPTIONS];
   // Normalize: accounts API may return poolTypes as objects { type, label, ... }, extract .type
-  const poolTypes = rawPoolTypes.map((pt: unknown) => typeof pt === "string" ? pt : (pt as { type?: string }).type ?? "").filter(Boolean);
+  const poolTypes = Array.from(new Set(rawPoolTypes.map((pt: unknown) => typeof pt === "string" ? pt : (pt as { type?: string }).type ?? "").filter(Boolean)));
   const poolPreferences = routing?.poolPreferences ?? accountsResource.data?.poolPreferences ?? {};
   const [updatingPool, setUpdatingPool] = useState<string | null>(null);
   const [poolMessage, setPoolMessage] = useState<string | null>(null);
