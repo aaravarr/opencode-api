@@ -9,12 +9,14 @@ const encryptionKey = Buffer.alloc(32, 8).toString("base64")
 const ownerUserId = "user-1"
 const usage = { FIVE_HOUR: { usagePercent: 1, resetInSeconds: 3600 }, WEEKLY: { usagePercent: 2, resetInSeconds: 86400 }, MONTHLY: { usagePercent: 3, resetInSeconds: 2592000 } }
 
-function setup() {
+function setup(poolType: "opencode-go" | "xai-grok" = "opencode-go") {
   const db = createDatabase(":memory:"); const timestamp = new Date().toISOString()
   db.prepare("INSERT INTO users(id,username,username_normalized,display_name,role,status,password_hash,created_at,updated_at) VALUES (?,?,?,?,?,'ACTIVE',?,?,?)")
     .run(ownerUserId, "owner", "owner", "Owner", "USER", "hash", timestamp, timestamp)
   const accounts = new AccountRepository(ownerUserId, db, new SecretVault(encryptionKey))
-  const accountIds = ["one", "two"].map((suffix) => accounts.upsertBrowserAccount({ workspaceId: `wrk_${suffix}`, authCookie: `cookie-${suffix}`, goApiKey: `sk-go-${suffix}`, goKeyId: `key_${suffix}`, subscriptionState: "ACTIVE", billingGuard: "VERIFIED_GO_ONLY", useBalance: false, usage }).id)
+  const accountIds = ["one", "two"].map((suffix) => poolType === "xai-grok"
+    ? accounts.createProviderAccount({ name: `grok-${suffix}`, poolType })
+    : accounts.upsertBrowserAccount({ workspaceId: `wrk_${suffix}`, authCookie: `cookie-${suffix}`, goApiKey: `sk-go-${suffix}`, goKeyId: `key_${suffix}`, subscriptionState: "ACTIVE", billingGuard: "VERIFIED_GO_ONLY", useBalance: false, usage })).map((account) => account.id)
   const hasher = new ApiKeyHasher("test-pepper"); const apiKey = new ApiKeyRepository(ownerUserId, db, hasher).create("test")
   const credentials: CredentialProvider = { async get(ownerId, accountId) { expect(ownerId).toBe(ownerUserId); const value = accounts.getCredential(accountId)!; return { accountId, goApiKey: value.goApiKey, credentialVersion: value.credentialVersion } } }
   new RoutingService(ownerUserId, db).setPreferred(accountIds[0])
@@ -71,6 +73,19 @@ describe("gateway", () => {
     const fetcher = vi.fn().mockResolvedValueOnce(new Response(stream, { headers: { "content-type": "text/event-stream", "retry-after": "120" } })).mockResolvedValueOnce(Response.json({ id: "ok" }))
     const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "responses")
     expect(response.status).toBe(200); expect(fetcher).toHaveBeenCalledTimes(2)
+  })
+
+  it("成功响应携带 provider 配额头时落库且保持成功状态", async () => {
+    const { db, apiKey, credentials, hasher } = setup("xai-grok")
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ id: "ok" }, { headers: {
+      "x-ratelimit-limit-tokens": "1000000",
+      "x-ratelimit-remaining-tokens": "750000",
+      "x-ratelimit-reset-tokens": String(Math.floor(Date.now() / 1000) + 3600),
+    } }))
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "chat/completions")
+    expect(response.status).toBe(200)
+    const quota = db.prepare("SELECT kind,usage_percent,source FROM quota_windows WHERE kind='ROLLING_24H'").get() as { kind: string; usage_percent: number; source: string }
+    expect(quota).toEqual({ kind: "ROLLING_24H", usage_percent: 25, source: "UPSTREAM_HEADER" })
   })
 
   it("用户停用后其统一 API key 立即失效", async () => {

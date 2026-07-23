@@ -419,7 +419,7 @@ export class GatewayService {
     for (const w of windows) {
       const resetAt = w.resetInSeconds ? new Date(now.getTime() + w.resetInSeconds * 1000).toISOString() : null
       this.db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at)
-        VALUES(?,?,?,?,?,?,'UPSTREAM_HEADER',?) ON CONFLICT(owner_user_id,account_id,kind) DO UPDATE SET
+        VALUES(?,?,?,?,?,'UPSTREAM_HEADER',?) ON CONFLICT(owner_user_id,account_id,kind) DO UPDATE SET
         usage_percent=excluded.usage_percent,reset_at=excluded.reset_at,source='UPSTREAM_HEADER',observation_version=observation_version+1,last_observed_at=excluded.last_observed_at`)
         .run(ownerUserId, accountId, w.kind, w.usagePercent, resetAt, timestamp)
     }
