@@ -35,7 +35,9 @@ import { apiFetch } from "../api-fetch"
 
 const XAI_OAUTH_TOKEN_URL = "https://auth.x.ai/oauth2/token"
 const XAI_DEFAULT_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
-const XAI_UPSTREAM_BASE_URL = "https://api.x.ai/v1"
+// OAuth (free-tier) accounts must go through the CLI gateway — api.x.ai/v1
+// rejects CLI OAuth bearer tokens with "Access to the chat endpoint is denied".
+const XAI_UPSTREAM_BASE_URL = "https://cli-chat-proxy.grok.com/v1"
 
 // xAI free-tier rolling 24h token window limit (tokens).
 const GROK_FREE_ROLLING_24H_TOKEN_LIMIT = 1_000_000
@@ -44,7 +46,8 @@ const REQUEST_TIMEOUT_MS = 30000
 
 // Grok CLI client identity required by some upstream endpoints.
 const GROK_CLIENT_VERSION = "0.2.93"
-const GROK_CLI_USER_AGENT = `grok-pager/${GROK_CLIENT_VERSION} grok-shell/${GROK_CLIENT_VERSION} (macos; aarch64)`
+// sub2api uses "sub2api-grok/1.0" so we match; the CLI gateway checks this UA.
+const GROK_CLI_USER_AGENT = "sub2api-grok/1.0"
 
 const GROK_MODELS = [
   "grok-4.5",
@@ -204,18 +207,27 @@ export class XAIGrokProvider implements Provider {
   ): Promise<{ valid: boolean; email?: string; planType?: string; extra?: Record<string, unknown> }> {
     const credential = await this.getCredential(account)
 
-    // Validate by listing models from the upstream; a 401/403 means invalid.
-    const resp = await apiFetch(`${XAI_UPSTREAM_BASE_URL}/models`, {
-      method: "GET",
+    // Validate by sending a minimal /responses probe to the CLI gateway, the
+    // same way sub2api probes Grok OAuth accounts. A 401/403 means invalid
+    // credentials; any other non-5xx means the token is accepted.
+    const resp = await apiFetch(`${XAI_UPSTREAM_BASE_URL}/responses`, {
+      method: "POST",
       headers: {
         Authorization: `Bearer ${credential.token}`,
-        accept: "application/json",
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "user-agent": GROK_CLI_USER_AGENT,
+        "x-grok-client-version": GROK_CLIENT_VERSION,
+        "x-grok-client-mode": "interactive",
       },
+      body: JSON.stringify({ model: "grok-4.5", input: "hi", stream: false }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     })
 
     if (resp.status === 401 || resp.status === 403) return { valid: false }
-    if (!resp.ok) return { valid: false }
+    // 400 (bad probe body) or 429 (rate limited) still means the token was
+    // accepted — only auth rejections count as invalid.
+    if (resp.status >= 500) return { valid: false }
 
     // Retrieve stored metadata (email/tier) which we captured at import time;
     // the upstream models endpoint does not return these.
@@ -349,6 +361,9 @@ export class XAIGrokProvider implements Provider {
     const headers = new Headers()
     headers.set("Authorization", `Bearer ${credential.token}`)
     headers.set("user-agent", GROK_CLI_USER_AGENT)
+    headers.set("x-grok-client-version", GROK_CLIENT_VERSION)
+    headers.set("x-grok-client-mode", "interactive")
+    headers.set("accept", "application/json, text/event-stream")
 
     if (input.method.toUpperCase() !== "GET") {
       headers.set("content-type", "application/json")

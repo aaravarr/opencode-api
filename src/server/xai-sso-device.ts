@@ -11,6 +11,11 @@
  * `redirect: "manual"` and loop over 3xx responses ourselves.
  */
 
+// Resolve hostnames through the domain mirror map so operators behind mirrors
+// can reach accounts.x.ai / auth.x.ai without a proxy.
+import { resolveMirrorUrl } from "./api-fetch"
+import { getSystemSettings } from "./settings"
+
 // ─── Constants ───────────────────────────────────────────────────────────
 
 const XAI_DEFAULT_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
@@ -141,7 +146,19 @@ function safeXaiAuthUrl(raw: string): boolean {
   if (!parsed.hostname) return false
   if (parsed.protocol !== "https:") return false
   const host = parsed.hostname.toLowerCase()
-  return host === "x.ai" || host.endsWith(".x.ai")
+  if (host === "x.ai" || host.endsWith(".x.ai")) return true
+  // Path-prefix mirrors rewrite 3xx Location headers to their own domain, so
+  // allow any host that is configured as a mirror target in system_settings.
+  try {
+    const mirrorMap = getSystemSettings().domainMirrorMap ?? {}
+    for (const mirrorUrl of Object.values(mirrorMap)) {
+      try {
+        const target = new URL(mirrorUrl)
+        if (target.hostname.toLowerCase() === host) return true
+      } catch { /* skip invalid mirror entry */ }
+    }
+  } catch { /* settings unavailable — strict mode */ }
+  return false
 }
 
 // ─── HTTP Client ──────────────────────────────────────────────────────────
@@ -217,7 +234,8 @@ class SsoDeviceFlow {
         headers["Content-Type"] = "application/x-www-form-urlencoded"
       }
 
-      const response = await fetch(currentUrl, {
+      const fetchedUrl = resolveMirrorUrl(currentUrl)
+      const response = await fetch(fetchedUrl, {
         method: currentMethod,
         headers,
         body,
