@@ -155,11 +155,17 @@ interface HttpResponse {
 class SsoDeviceFlow {
   private cookies = new Map<string, string>()
   private readonly userAgent: string
+  private readonly dispatcher?: object
 
   constructor(ssoToken: string, userAgent?: string) {
     this.userAgent = userAgent?.trim() || SSO_DEFAULT_UA
     this.cookies.set("sso", ssoToken)
     this.cookies.set("sso-rw", ssoToken)
+    // Use EnvHttpProxyAgent so HTTP_PROXY/HTTPS_PROXY env vars are respected
+    try {
+      const { EnvHttpProxyAgent } = require("undici") as { EnvHttpProxyAgent: new () => unknown }
+      this.dispatcher = new EnvHttpProxyAgent() as object
+    } catch { /* undici not available or no proxy configured — direct fetch */ }
   }
 
   private cookieHeader(): string {
@@ -217,6 +223,7 @@ class SsoDeviceFlow {
         body,
         redirect: "manual",
         signal,
+        ...(this.dispatcher ? { dispatcher: this.dispatcher } : {}),
       })
 
       this.captureCookies(response)
