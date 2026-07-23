@@ -11,6 +11,8 @@ export interface QuotaWindow {
   resetInSec?: number | null;
   usagePercent?: number | null;
   source?: string | null;
+  limitValue?: number | null;
+  remainingValue?: number | null;
 }
 
 export interface Account {
@@ -57,6 +59,9 @@ export interface Account {
   lastCheckedAt?: string | null;
   nextEligibleAt?: string | null;
   lastError?: string | null;
+  disabledReason?: string | null;
+  disabledAt?: string | null;
+  externalId?: string | null;
   poolType?: string;
 }
 

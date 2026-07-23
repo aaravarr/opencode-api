@@ -1,8 +1,6 @@
 import { getDatabase } from "@/server/db"
 import { RoutingService } from "@/server/routing"
 import { requireSession } from "../_auth"
-import { tryGetProvider } from "@/server/providers"
-import { AccountRepository } from "@/server/repository"
 
 export const runtime = "nodejs"
 
@@ -99,6 +97,7 @@ export function GET(request: Request) {
   const accountNames = db.prepare("SELECT id, name FROM accounts WHERE owner_user_id=?").all(user.id) as { id: string; name: string }[]
   // Pool type statistics
   const poolTypeStats = new RoutingService(user.id, db).getPoolTypeStats()
+  const aggregatePoolStat = (key: "ready" | "blocked" | "inactive") => Object.values(poolTypeStats).reduce((sum, value) => sum + value[key], 0)
   const readyRows = db.prepare("SELECT q.account_id,MIN(q.reset_at) AS ready_at FROM quota_windows q JOIN accounts a ON a.id=q.account_id WHERE a.owner_user_id=? AND q.usage_percent>=100 AND julianday(q.reset_at)>julianday('now') GROUP BY q.account_id").all(user.id) as { account_id: string; ready_at: string }[]
   const recentAttemptsPayload: Record<string, unknown> = {}
   for (const [requestId, attempts] of Object.entries(recentAttempts)) {
@@ -119,9 +118,9 @@ export function GET(request: Request) {
   return Response.json({
     counts: {
       totalAccounts: scalar("SELECT COUNT(*) AS value FROM accounts WHERE owner_user_id=?"),
-      readyAccounts: scalar("SELECT COUNT(*) AS value FROM accounts a WHERE owner_user_id=? AND admin_state='ENABLED' AND subscription_state='ACTIVE' AND billing_guard='VERIFIED_GO_ONLY' AND use_balance=0 AND auth_state='VALID' AND NOT EXISTS (SELECT 1 FROM quota_windows q WHERE q.account_id=a.id AND q.usage_percent>=100 AND (q.reset_at IS NULL OR julianday(q.reset_at)>julianday('now')))"),
-      quotaBlocked: scalar("SELECT COUNT(DISTINCT q.account_id) AS value FROM quota_windows q JOIN accounts a ON a.id=q.account_id WHERE a.owner_user_id=? AND q.usage_percent>=100 AND (q.reset_at IS NULL OR julianday(q.reset_at)>julianday('now'))"),
-      inactiveAccounts: scalar("SELECT COUNT(*) AS value FROM accounts WHERE owner_user_id=? AND (admin_state='DISABLED' OR subscription_state!='ACTIVE' OR auth_state!='VALID' OR billing_guard!='VERIFIED_GO_ONLY' OR use_balance IS NOT 0)"),
+      readyAccounts: aggregatePoolStat("ready"),
+      quotaBlocked: aggregatePoolStat("blocked"),
+      inactiveAccounts: aggregatePoolStat("inactive"),
       apiKeys: scalar("SELECT COUNT(*) AS value FROM api_keys WHERE owner_user_id=? AND enabled=1"),
       byPoolType: poolTypeStats,
     },

@@ -12,7 +12,7 @@ export async function GET(request: Request) {
   const db = getDatabase()
   const accounts = new AccountRepository(user.id, db).list()
   const routing = new RoutingService(user.id, db).getState()
-  const windows = db.prepare("SELECT q.account_id,q.kind,q.usage_percent,q.reset_at,q.source,q.last_observed_at FROM quota_windows q JOIN accounts a ON a.id=q.account_id WHERE a.owner_user_id=? ORDER BY q.last_observed_at DESC").all(user.id) as Record<string, unknown>[]
+  const windows = db.prepare("SELECT q.account_id,q.kind,q.usage_percent,q.reset_at,q.source,q.last_observed_at,q.limit_value,q.remaining_value FROM quota_windows q JOIN accounts a ON a.id=q.account_id WHERE a.owner_user_id=? ORDER BY q.last_observed_at DESC").all(user.id) as Record<string, unknown>[]
   return Response.json({
     accounts: accounts.map((account) => {
       return {
@@ -29,6 +29,8 @@ export async function GET(request: Request) {
         resetAt: window.reset_at,
         source: window.source,
         lastObservedAt: window.last_observed_at,
+        limitValue: window.limit_value,
+        remainingValue: window.remaining_value,
       })),
     }}),
     poolTypes: Object.keys(POOL_TYPE_METADATA).map((key) => {

@@ -15,6 +15,7 @@
 // can reach accounts.x.ai / auth.x.ai without a proxy.
 import { resolveMirrorUrl } from "./api-fetch"
 import { getSystemSettings } from "./settings"
+import { EnvHttpProxyAgent } from "undici"
 
 // ─── Constants ───────────────────────────────────────────────────────────
 
@@ -179,10 +180,7 @@ class SsoDeviceFlow {
     this.cookies.set("sso", ssoToken)
     this.cookies.set("sso-rw", ssoToken)
     // Use EnvHttpProxyAgent so HTTP_PROXY/HTTPS_PROXY env vars are respected
-    try {
-      const { EnvHttpProxyAgent } = require("undici") as { EnvHttpProxyAgent: new () => unknown }
-      this.dispatcher = new EnvHttpProxyAgent() as object
-    } catch { /* undici not available or no proxy configured — direct fetch */ }
+    this.dispatcher = new EnvHttpProxyAgent() as object
   }
 
   private cookieHeader(): string {

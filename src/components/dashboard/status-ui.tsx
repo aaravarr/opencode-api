@@ -54,14 +54,19 @@ const statusLabels: Record<string, string> = {
   pending: "待同步",
   unverified: "不可路由",
   error: "异常",
+  banned: "已封禁",
+  queued: "排队中",
+  running: "处理中",
+  completed: "已完成",
+  failed: "失败",
   unknown: "未知",
 };
 
 export function StatusBadge({ status }: { status?: string | null }) {
   const key = (status || "unknown").toLowerCase();
   const available = key === "available" || key === "active" || key === "success" || key === "completed";
-  const warning = key === "blocked" || key === "exhausted" || key === "pending" || key === "unverified" || key === "cooldown";
-  const danger = key.includes("error") || key.includes("expired") || key.includes("inactive") || key === "failed";
+  const warning = key === "blocked" || key === "exhausted" || key === "pending" || key === "unverified" || key === "cooldown" || key === "queued" || key === "running";
+  const danger = key.includes("error") || key.includes("expired") || key.includes("inactive") || key === "failed" || key === "banned";
   return (
     <Badge
       variant="outline"
@@ -81,7 +86,9 @@ export function StatusBadge({ status }: { status?: string | null }) {
 }
 
 export function AccountBadges({ account }: { account: Account }) {
-  const status = account.adminState === "DISABLED"
+  const status = account.disabledReason === "XAI_ACCOUNT_BANNED"
+    ? "banned"
+    : account.adminState === "DISABLED"
     ? "disabled"
     : account.authState === "AUTH_ERROR" || account.authState === "REAUTH_REQUIRED"
       ? "auth_error"
@@ -104,6 +111,13 @@ export function AccountBadges({ account }: { account: Account }) {
 }
 
 export function BillingSafetyBadge({ account }: { account: Account }) {
+  const poolType = account.poolType || "opencode-go";
+  if (poolType === "xai-grok") {
+    return <Badge variant="outline" className="h-5 rounded-sm border-emerald/30 bg-emerald-soft px-1.5 text-[11px] text-emerald-deep">OAuth Free</Badge>;
+  }
+  if (poolType === "openai-cpa" || poolType === "openai-oauth") {
+    return <Badge variant="outline" className="h-5 rounded-sm border-violet/20 bg-violet-soft px-1.5 text-[11px] text-violet-deep">{poolType === "openai-oauth" ? "OAuth" : "Access Token"}</Badge>;
+  }
   const verified = account.billingGuard === "VERIFIED_GO_ONLY";
   const label = verified
     ? "Go only"
@@ -163,7 +177,7 @@ export function QuotaStatus({
     : quota?.resetAt
       ? formatDate(quota.resetAt)
       : null;
-  const stateLabel = state === "available" ? "可用" : state === "blocked" ? "已耗尽" : "未知";
+  const stateLabel = state === "available" ? "可用" : state === "blocked" ? "已耗尽" : "待观测";
   const resetLabel = state === "blocked" ? "预计恢复" : "下次重置";
 
   if (variant === "card") {
@@ -218,9 +232,19 @@ export function QuotaStatus({
       >
         <div className={`h-full rounded-full ${used != null && used >= 100 ? "bg-warning" : "bg-foreground/70"}`} style={{ width: `${used ?? 0}%` }} />
       </div>
+      {quota?.limitValue != null && quota?.remainingValue != null ? (
+        <p className="mt-1 truncate font-mono text-[10px] text-muted-foreground" title={`${quota.limitValue - quota.remainingValue} / ${quota.limitValue} tokens`}>
+          {compactNumber(quota.limitValue - quota.remainingValue)} / {compactNumber(quota.limitValue)} tokens
+        </p>
+      ) : (
       <p className="mt-1 truncate font-mono text-[10px] text-muted-foreground" title={reset ?? undefined}>
-        {state === "available" ? (reset ? `RESET ${reset}` : "AVAILABLE") : state === "blocked" ? (reset ? `RESET ${reset}` : "BLOCKED") : "UNKNOWN"}
+        {state === "available" ? (reset ? `重置 ${reset}` : "已观测") : state === "blocked" ? (reset ? `重置 ${reset}` : "已耗尽") : "等待首次请求或手动同步"}
       </p>
+      )}
     </div>
   );
+}
+
+function compactNumber(value: number): string {
+  return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(value);
 }

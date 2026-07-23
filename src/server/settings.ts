@@ -334,8 +334,10 @@ export function updateSystemSettings(
     for (const [key, value] of entries)
       statement.run(value, updatedByUserId ?? null, now, key);
   })();
-  // Invalidate mirror cache so new settings take effect immediately.
-  try { const { invalidateMirrorCache } = require("./api-fetch"); invalidateMirrorCache() } catch {}
+  // Avoid a settings <-> fetch module cycle while still applying mirror
+  // changes immediately when the fetch layer has already initialized.
+  const mirrorCacheGlobal = globalThis as typeof globalThis & { __invalidateDomainMirrorCache?: () => void };
+  mirrorCacheGlobal.__invalidateDomainMirrorCache?.();
   return getSystemSettings(db);
 }
 

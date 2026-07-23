@@ -138,7 +138,7 @@ export function SettingsPage() {
       <PageIntro
         eyebrow="SYSTEM SETTINGS"
         title="系统设置"
-        description="Go 请求地址和额度维护策略统一保存在数据库中，无需编辑 .env。修改后对所有用户生效。"
+        description="Provider 网络、额度维护与日志策略统一保存在数据库中，无需编辑 .env。修改后即时生效。"
         actions={
           <Button
             variant="outline"
@@ -161,8 +161,8 @@ export function SettingsPage() {
       {form ? (
         <form onSubmit={save} className="space-y-4">
           <Panel
-            title="OpenCode 连接"
-            description="Go API Key 调用的官方上游地址。"
+            title="Provider 网络"
+            description="集中管理各 Provider 的域名镜像，以及 OpenCode Go 的专用上游地址。"
           >
             <div className="grid gap-5 p-4 sm:p-5 lg:grid-cols-2">
               <div className="lg:col-span-2">
@@ -225,7 +225,7 @@ export function SettingsPage() {
           </Panel>
           <Panel
             title="维护任务"
-            description="只刷新当前路由或近期使用账号的 Console 额度，不对长期闲置账号反复探测。"
+            description="按各 Provider 的同步方式刷新近期使用账号；长期闲置账号不会被反复探测。"
           >
             <div className="grid gap-5 p-4 sm:p-5 lg:grid-cols-3">
               <Field label="执行间隔（毫秒）">

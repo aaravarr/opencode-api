@@ -36,7 +36,7 @@ export interface AccountRecord {
   workspaceId: string
   email: string | null
   goKeyId: string
-  credentialSource: "BROWSER_EXTENSION"
+  credentialSource: string
   extensionVersion: string | null
   lastSyncedAt: string
   adminState: AdminState
@@ -55,6 +55,10 @@ export interface AccountRecord {
   lastRequestAt: string | null
   lastSuccessAt: string | null
   lastLimitAt: string | null
+  disabledReason: string | null
+  disabledAt: string | null
+  lastError: string | null
+  externalId: string | null
   maxConcurrency: number
   ordinal: number
   createdAt: string
@@ -110,5 +114,7 @@ export interface QuotaSnapshot {
   usagePercent: number
   resetAt: string | null
   lastObservedAt: string
-  source: "DASHBOARD" | "UPSTREAM_429"
+  source: "DASHBOARD" | "UPSTREAM_429" | "UPSTREAM_HEADER" | "API_PROBE"
+  limitValue?: number | null
+  remainingValue?: number | null
 }

@@ -9,6 +9,15 @@ const directories: string[] = []
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }) })
 
 describe("database schema", () => {
+  it("包含异步导入与真实额度字段", () => {
+    const db = createDatabase(":memory:")
+    const quotaColumns = (db.prepare("PRAGMA table_info(quota_windows)").all() as { name: string }[]).map((column) => column.name)
+    expect(quotaColumns).toEqual(expect.arrayContaining(["limit_value", "remaining_value"]))
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='import_jobs'").get()).toEqual({ name: "import_jobs" })
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='import_job_items'").get()).toEqual({ name: "import_job_items" })
+    db.close()
+  })
+
   it("检测到旧账号表时只清理账号域并保留用户、API key 和系统设置", () => {
     const directory = mkdtempSync(join(tmpdir(), "opencode-db-")); directories.push(directory)
     const filename = join(directory, "legacy.db"); const legacy = new Database(filename)

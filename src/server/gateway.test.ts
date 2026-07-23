@@ -88,6 +88,17 @@ describe("gateway", () => {
     expect(quota).toEqual({ kind: "ROLLING_24H", usage_percent: 25, source: "UPSTREAM_HEADER" })
   })
 
+  it("xAI 明确封禁响应会永久停用账号并切换", async () => {
+    const { db, apiKey, credentials, hasher } = setup("xai-grok")
+    const denied = JSON.stringify({ code: "permission-denied", error: "Access to the chat endpoint is denied. Please ensure you're using the correct credentials." })
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(denied, { status: 403 })).mockResolvedValueOnce(Response.json({ id: "ok" }))
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "chat/completions")
+    expect(response.status).toBe(200)
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    const disabled = db.prepare("SELECT admin_state,auth_state,disabled_reason FROM accounts WHERE disabled_reason='XAI_ACCOUNT_BANNED'").get()
+    expect(disabled).toEqual({ admin_state: "DISABLED", auth_state: "AUTH_ERROR", disabled_reason: "XAI_ACCOUNT_BANNED" })
+  })
+
   it("用户停用后其统一 API key 立即失效", async () => {
     const { db, apiKey, credentials, hasher } = setup(); db.prepare("UPDATE users SET status='DISABLED' WHERE id=?").run(ownerUserId)
     const fetcher = vi.fn(); const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "responses")

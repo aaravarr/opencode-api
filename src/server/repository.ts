@@ -15,7 +15,7 @@ function accountFromRow(row: Row): AccountRecord {
   return {
     id: String(row.id), ownerUserId: String(row.owner_user_id), name: String(row.name), workspaceId: String(row.workspace_id),
     poolType: (nullableString(row.pool_type) ?? "opencode-go") as PoolType,
-    email: nullableString(row.email), goKeyId: String(row.go_key_id), credentialSource: "BROWSER_EXTENSION",
+    email: nullableString(row.email), goKeyId: String(row.go_key_id), credentialSource: String(row.credential_source),
     extensionVersion: nullableString(row.extension_version), lastSyncedAt: String(row.last_synced_at),
     adminState: row.admin_state as AdminState, authState: row.auth_state as AuthState,
     subscriptionState: row.subscription_state as SubscriptionState, billingGuard: row.billing_guard as BillingGuard,
@@ -25,6 +25,8 @@ function accountFromRow(row: Row): AccountRecord {
     lastUsageCheckAt: nullableString(row.last_usage_check_at), nextUsageCheckAt: String(row.next_usage_check_at),
     lastSelectedAt: nullableString(row.last_selected_at), lastRequestAt: nullableString(row.last_request_at),
     lastSuccessAt: nullableString(row.last_success_at), lastLimitAt: nullableString(row.last_limit_at),
+    disabledReason: nullableString(row.disabled_reason), disabledAt: nullableString(row.disabled_at), lastError: nullableString(row.last_error),
+    externalId: nullableString(row.external_id),
     maxConcurrency: Number(row.max_concurrency), ordinal: Number(row.ordinal), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   }
 }
@@ -75,18 +77,7 @@ export class AccountRepository {
   }
 
   createCpaAccount(input: { name: string; email?: string | null }): AccountRecord {
-    const id = randomUUID()
-    const timestamp = nowIso()
-    const ordinal = Number((this.db.prepare("SELECT COALESCE(MAX(ordinal), -1) + 1 value FROM accounts WHERE owner_user_id=?").get(this.ownerUserId) as Row).value)
-    this.db.prepare(`INSERT INTO accounts(id, owner_user_id, name, pool_type, workspace_id, go_key_id, last_synced_at,
-      auth_cookie_ciphertext, go_api_key_ciphertext, subscription_state, billing_guard, next_usage_check_at, ordinal, created_at, updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-      id, this.ownerUserId, input.name, "openai-cpa", `cpa_${id}`, "cpa", timestamp,
-      this.secretVault().encrypt("unused"), this.secretVault().encrypt("unused"), "ACTIVE", "VERIFIED_GO_ONLY",
-      new Date(Date.now() + 60_000).toISOString(), ordinal, timestamp, timestamp,
-    )
-    if (input.email) this.db.prepare("UPDATE accounts SET email=? WHERE id=? AND owner_user_id=?").run(input.email, id, this.ownerUserId)
-    return this.get(id)!
+    return this.createProviderAccount({ name: input.name, email: input.email, poolType: "openai-cpa" })
   }
 
   /**
@@ -95,18 +86,31 @@ export class AccountRepository {
    * placeholder auth/cookie ciphertext; the provider layer populates
    * `provider_credentials` separately. Defaults match createCpaAccount.
    */
-  createProviderAccount(input: { name: string; poolType: PoolType; email?: string | null; subscriptionState?: string }): AccountRecord {
+  createProviderAccount(input: { name: string; poolType: PoolType; email?: string | null; subscriptionState?: string; externalId?: string | null }): AccountRecord {
+    if (input.externalId) {
+      const existing = this.db.prepare("SELECT id,disabled_reason FROM accounts WHERE owner_user_id=? AND pool_type=? AND external_id=?").get(this.ownerUserId, input.poolType, input.externalId) as { id: string; disabled_reason: string | null } | undefined
+      if (existing) {
+        if (existing.disabled_reason === "XAI_ACCOUNT_BANNED") {
+          this.db.prepare("UPDATE accounts SET name=?,email=COALESCE(?,email),updated_at=? WHERE id=? AND owner_user_id=?")
+            .run(input.name, input.email ?? null, nowIso(), existing.id, this.ownerUserId)
+        } else {
+          this.db.prepare(`UPDATE accounts SET name=?,email=COALESCE(?,email),admin_state='ENABLED',auth_state='VALID',disabled_reason=NULL,disabled_at=NULL,last_error=NULL,updated_at=? WHERE id=? AND owner_user_id=?`)
+            .run(input.name, input.email ?? null, nowIso(), existing.id, this.ownerUserId)
+        }
+        return this.get(existing.id)!
+      }
+    }
     const id = randomUUID()
     const timestamp = nowIso()
     const ordinal = Number((this.db.prepare("SELECT COALESCE(MAX(ordinal), -1) + 1 value FROM accounts WHERE owner_user_id=?").get(this.ownerUserId) as Row).value)
-    const workspaceId = `${input.poolType === "xai-grok" ? "grok" : input.poolType}_${id}`
-    this.db.prepare(`INSERT INTO accounts(id, owner_user_id, name, pool_type, workspace_id, go_key_id, last_synced_at,
-      auth_cookie_ciphertext, go_api_key_ciphertext, subscription_state, billing_guard, next_usage_check_at, ordinal, created_at, updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-      id, this.ownerUserId, input.name, input.poolType, workspaceId, input.poolType, timestamp,
+    const workspaceId = `${input.poolType === "xai-grok" ? "grok" : input.poolType}_${this.ownerUserId}_${input.externalId ?? id}`
+    this.db.prepare(`INSERT INTO accounts(id, owner_user_id, name, pool_type, workspace_id, go_key_id, credential_source, last_synced_at,
+      auth_cookie_ciphertext, go_api_key_ciphertext, subscription_state, billing_guard, next_usage_check_at, ordinal, created_at, updated_at, external_id)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      id, this.ownerUserId, input.name, input.poolType, workspaceId, input.poolType, "PROVIDER_IMPORT", timestamp,
       this.secretVault().encrypt("unused"), this.secretVault().encrypt("unused"),
       input.subscriptionState ?? "ACTIVE", "VERIFIED_GO_ONLY",
-      new Date(Date.now() + 60_000).toISOString(), ordinal, timestamp, timestamp,
+      new Date(Date.now() + 60_000).toISOString(), ordinal, timestamp, timestamp, input.externalId ?? null,
     )
     if (input.email) this.db.prepare("UPDATE accounts SET email=? WHERE id=? AND owner_user_id=?").run(input.email, id, this.ownerUserId)
     return this.get(id)!
@@ -164,7 +168,7 @@ export class AccountRepository {
     })()
   }
 
-  updateState(accountId: string, input: Partial<{ name: string; adminState: AdminState; authState: AuthState; subscriptionState: SubscriptionState; goSubscriptionId: string | null; isZenSubscribed: boolean; zenSubscriptionId: string | null; hasManageSubscriptionButton: boolean; billingGuard: BillingGuard; useBalance: boolean | null; maxConcurrency: number; lastSyncedAt: string }>): AccountRecord | null {
+  updateState(accountId: string, input: Partial<{ name: string; adminState: AdminState; authState: AuthState; subscriptionState: SubscriptionState; goSubscriptionId: string | null; isZenSubscribed: boolean; zenSubscriptionId: string | null; hasManageSubscriptionButton: boolean; billingGuard: BillingGuard; useBalance: boolean | null; maxConcurrency: number; lastSyncedAt: string; disabledReason: string | null; disabledAt: string | null; lastError: string | null }>): AccountRecord | null {
     const entries: [string, unknown][] = []
     if (input.name !== undefined) entries.push(["name", input.name])
     if (input.adminState !== undefined) entries.push(["admin_state", input.adminState])
@@ -178,6 +182,9 @@ export class AccountRepository {
     if (input.useBalance !== undefined) entries.push(["use_balance", input.useBalance === null ? null : Number(input.useBalance)])
     if (input.maxConcurrency !== undefined) entries.push(["max_concurrency", input.maxConcurrency])
     if (input.lastSyncedAt !== undefined) entries.push(["last_synced_at", input.lastSyncedAt])
+    if (input.disabledReason !== undefined) entries.push(["disabled_reason", input.disabledReason])
+    if (input.disabledAt !== undefined) entries.push(["disabled_at", input.disabledAt])
+    if (input.lastError !== undefined) entries.push(["last_error", input.lastError])
     if (entries.length) this.db.prepare(`UPDATE accounts SET ${entries.map(([key]) => `${key}=?`).join(",")},updated_at=? WHERE id=? AND owner_user_id=?`)
       .run(...entries.map(([, value]) => value), nowIso(), accountId, this.ownerUserId)
     return this.get(accountId)

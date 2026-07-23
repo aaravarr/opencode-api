@@ -189,7 +189,7 @@ export async function POST(request: Request) {
       const email = String(credentials.email ?? "")
       const planType = String(credentials.plan_type ?? "")
 
-      const account = accountRepo.createCpaAccount({ name: acct.name, email: email || null })
+      const account = accountRepo.createProviderAccount({ name: acct.name, poolType, email: email || null })
 
       const credData: Record<string, string> = { token }
       if (chatgptAccountId) credData.chatgptAccountId = chatgptAccountId

@@ -39,10 +39,54 @@ const XAI_DEFAULT_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
 // rejects CLI OAuth bearer tokens with "Access to the chat endpoint is denied".
 const XAI_UPSTREAM_BASE_URL = "https://cli-chat-proxy.grok.com/v1"
 
-// xAI free-tier rolling 24h token window limit (tokens).
-const GROK_FREE_ROLLING_24H_TOKEN_LIMIT = 1_000_000
-
 const REQUEST_TIMEOUT_MS = 30000
+
+const ACCOUNT_DENIED_MARKERS = [
+  "permission-denied",
+  "access to the chat endpoint is denied",
+] as const
+
+export class XAIAccountBannedError extends Error {
+  readonly status = 403
+  constructor(message = "xAI 账号已被上游禁止访问") {
+    super(message)
+    this.name = "XAIAccountBannedError"
+  }
+}
+
+export function isXaiAccountBannedResponse(status: number, body: string): boolean {
+  if (status !== 403) return false
+  const normalized = body.toLowerCase()
+  return ACCOUNT_DENIED_MARKERS.some((marker) => normalized.includes(marker))
+}
+
+export async function exchangeXaiRefreshToken(refreshToken: string, clientId = XAI_DEFAULT_CLIENT_ID): Promise<{
+  accessToken: string
+  refreshToken: string
+  expiresAt: string
+  idToken?: string
+  tokenType?: string
+  scope?: string
+}> {
+  const resp = await apiFetch(XAI_OAUTH_TOKEN_URL, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken, client_id: clientId || XAI_DEFAULT_CLIENT_ID }).toString(),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  })
+  const body = await resp.text()
+  if (!resp.ok) throw new Error(`xAI refresh token 刷新失败（HTTP ${resp.status}）`)
+  const token = JSON.parse(body) as { access_token?: string; refresh_token?: string; expires_in?: number; id_token?: string; token_type?: string; scope?: string }
+  if (!token.access_token) throw new Error("xAI refresh token 响应缺少 access_token")
+  return {
+    accessToken: token.access_token,
+    refreshToken: token.refresh_token || refreshToken,
+    expiresAt: String(Math.floor(Date.now() / 1000) + (token.expires_in ?? 21600)),
+    idToken: token.id_token,
+    tokenType: token.token_type,
+    scope: token.scope,
+  }
+}
 
 // Grok CLI client identity required by some upstream endpoints.
 const GROK_CLIENT_VERSION = "0.2.93"
@@ -79,11 +123,6 @@ const PASSTHROUGH_HEADERS = [
 const RATELIMIT_LIMIT_TOKENS = "x-ratelimit-limit-tokens"
 const RATELIMIT_REMAINING_TOKENS = "x-ratelimit-remaining-tokens"
 const RATELIMIT_RESET_TOKENS = "x-ratelimit-reset-tokens"
-const RATELIMIT_LIMIT_REQUESTS = "x-ratelimit-limit-requests"
-const RATELIMIT_REMAINING_REQUESTS = "x-ratelimit-remaining-requests"
-const RATELIMIT_RESET_REQUESTS = "x-ratelimit-reset-requests"
-const SUBSCRIPTION_TIER_HEADERS = ["xai-subscription-tier", "x-subscription-tier"]
-const ENTITLEMENT_STATUS_HEADERS = ["xai-entitlement-status", "x-entitlement-status"]
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -95,18 +134,6 @@ function parseNumberFromHeader(value: string | null): number | null {
 
 function toISOFromUnixSeconds(unixSeconds: number): string {
   return new Date(unixSeconds * 1000).toISOString()
-}
-
-function toISOFromNowPlusSeconds(seconds: number): string {
-  return new Date(Date.now() + seconds * 1000).toISOString()
-}
-
-function firstHeader(headers: Headers, names: readonly string[]): string {
-  for (const name of names) {
-    const value = headers.get(name)
-    if (value) return value
-  }
-  return ""
 }
 
 // ─── Provider ────────────────────────────────────────────────────────────
@@ -140,35 +167,15 @@ export class XAIGrokProvider implements Provider {
     if (data.token && expiresAt && now < (expiresAt - 180) * 1000) return credential
 
     try {
-      const resp = await apiFetch(XAI_OAUTH_TOKEN_URL, {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          grant_type: "refresh_token",
-          refresh_token: data.refreshToken,
-          client_id: data.clientId || XAI_DEFAULT_CLIENT_ID,
-        }).toString(),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      })
-      if (!resp.ok) return credential // Leave the existing credential in place.
-      const tokenResp = (await resp.json()) as {
-        access_token?: string
-        refresh_token?: string
-        expires_in?: number
-        id_token?: string
-        token_type?: string
-        scope?: string
-      }
-      if (!tokenResp.access_token) return credential
-
-      data.token = tokenResp.access_token
-      if (tokenResp.refresh_token) data.refreshToken = tokenResp.refresh_token
-      if (tokenResp.expires_in) data.expiresAt = String(Math.floor(now / 1000) + tokenResp.expires_in)
+      const tokenResp = await exchangeXaiRefreshToken(data.refreshToken, data.clientId || XAI_DEFAULT_CLIENT_ID)
+      data.token = tokenResp.accessToken
+      data.refreshToken = tokenResp.refreshToken
+      data.expiresAt = tokenResp.expiresAt
       db.prepare("UPDATE provider_credentials SET credential_data_ciphertext=?, credential_version=credential_version+1, updated_at=? WHERE account_id=?")
         .run(this.vault.encrypt(JSON.stringify(data)), new Date().toISOString(), accountId)
 
       const extraHeaders = credential.extraHeaders ?? {}
-      return { token: tokenResp.access_token, extraHeaders, credentialVersion: row.credential_version + 1 }
+      return { token: tokenResp.accessToken, extraHeaders, credentialVersion: row.credential_version + 1 }
     } catch {
       return credential // If refresh fails, try with the current credential.
     }
@@ -260,29 +267,31 @@ export class XAIGrokProvider implements Provider {
   }
 
   async refreshQuota(_accountId: string, account: AccountRecord): Promise<QuotaWindow[]> {
-    // Free-tier quota is surfaced only via response headers, so there is no
-    // dedicated dashboard endpoint to poll. We rely on extractQuotaFromResponse
-    // during real requests. When a cron/task explicitly asks for a refresh, we
-    // fall back to parsing the CLI billing endpoint best-effort, which returns
-    // the subscription tier but not the rolling-token window.
+    // Free-tier quota is only exposed on inference responses. A manual or
+    // scheduled refresh therefore sends the smallest supported probe and
+    // persists the exact limit / remaining / reset values from its headers.
     const credential = await this.getCredential(account)
-    const resp = await apiFetch("https://cli-chat-proxy.grok.com/v1/billing?format=credits", {
-      method: "GET",
+    const resp = await apiFetch(`${XAI_UPSTREAM_BASE_URL}/responses`, {
+      method: "POST",
       headers: {
         Authorization: `Bearer ${credential.token}`,
-        accept: "application/json",
+        accept: "application/json, text/event-stream",
         "content-type": "application/json",
-        "x-xai-token-auth": "xai-grok-cli",
         "x-grok-client-version": GROK_CLIENT_VERSION,
+        "x-grok-client-mode": "interactive",
         "user-agent": GROK_CLI_USER_AGENT,
       },
+      body: JSON.stringify({ model: "grok-4.5", input: "hi", stream: false, max_output_tokens: 1 }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    }).catch(() => null)
-
-    // We don't expose billing as a QuotaWindow because free-tier has no
-    // weekly/monthly credit window; we return [] and depend on headers.
-    if (!resp || !resp.ok) return []
-    return []
+    })
+    const windows = this.extractQuotaFromResponse(resp.headers) ?? []
+    if (!resp.ok && resp.status !== 429) {
+      const body = await resp.text()
+      if (isXaiAccountBannedResponse(resp.status, body)) throw new XAIAccountBannedError()
+      throw new Error(`xAI 额度探测失败（HTTP ${resp.status}）`)
+    }
+    try { await resp.body?.cancel() } catch { /* Headers are sufficient. */ }
+    return windows.map((window) => ({ ...window, source: "API_PROBE" as const }))
   }
 
   extractQuotaFromResponse(headers: Headers): QuotaWindow[] | null {
@@ -324,6 +333,8 @@ export class XAIGrokProvider implements Provider {
       windows.push({
         kind: "ROLLING_24H",
         usagePercent,
+        limitValue: limitTokens,
+        remainingValue: remainingTokens,
         resetAt,
         resetInSeconds,
         lastObservedAt: now,
@@ -336,17 +347,18 @@ export class XAIGrokProvider implements Provider {
 
   // ── Models ─────────────────────────────────────────────────────────────
 
-  getAvailableModels(_accounts: AccountRecord[]): string[] {
+  getAvailableModels(): string[] {
     return [...GROK_MODELS]
   }
 
   resolveModel(_account: AccountRecord, requestedModel: string): string {
+    void _account
     return requestedModel
   }
 
   // ── Upstream Forwarding ────────────────────────────────────────────────
 
-  getUpstreamBaseUrl(_account: AccountRecord): string {
+  getUpstreamBaseUrl(): string {
     return XAI_UPSTREAM_BASE_URL
   }
 
@@ -355,7 +367,8 @@ export class XAIGrokProvider implements Provider {
     credential: ProviderCredential,
     _account: AccountRecord,
   ): ForwardTarget {
-    const baseUrl = this.getUpstreamBaseUrl(_account)
+    void _account
+    const baseUrl = this.getUpstreamBaseUrl()
     const url = `${baseUrl}/${input.endpoint}`
 
     const headers = new Headers()
@@ -384,6 +397,13 @@ export class XAIGrokProvider implements Provider {
   // ── Error Classification ───────────────────────────────────────────────
 
   classifyError(status: number, body: string, headers: Headers): UpstreamErrorClassification | null {
+    if (isXaiAccountBannedResponse(status, body)) {
+      return {
+        shouldSwitchAccount: true,
+        errorType: "XAI_ACCOUNT_BANNED",
+        permanentlyDisableAccount: true,
+      }
+    }
     if (status === 429) {
       const retryAfterHeader = headers.get("retry-after")
       const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : null

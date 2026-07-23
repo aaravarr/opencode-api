@@ -2,6 +2,8 @@ import { getDatabase } from "@/server/db"
 import { OpenCodeWebError } from "@/server/opencode-web/client"
 import { getOpenCodeWebService } from "@/server/opencode-web/service"
 import { AccountRepository } from "@/server/repository"
+import { syncProviderAccount } from "@/server/provider-sync"
+import { XAIAccountBannedError } from "@/server/providers/xai-grok"
 import { requireSession } from "../../../_auth"
 
 export const runtime = "nodejs"
@@ -11,11 +13,15 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   if (user instanceof Response) return user
   const { id } = await context.params
   const db = getDatabase()
-  if (!new AccountRepository(user.id, db).get(id)) {
+  const existing = new AccountRepository(user.id, db).get(id)
+  if (!existing) {
     return Response.json({ error: { type: "not_found", message: "账号不存在" } }, { status: 404 })
   }
 
   try {
+    if (existing.poolType !== "opencode-go") {
+      return Response.json(await syncProviderAccount(user.id, id, db))
+    }
     const account = await getOpenCodeWebService(user.id).refreshUsage(id)
     const quotaWindows = db.prepare(`SELECT kind,usage_percent,reset_at,source,last_observed_at
       FROM quota_windows WHERE owner_user_id=? AND account_id=? ORDER BY last_observed_at DESC`)
@@ -33,6 +39,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       } : null,
     })
   } catch (cause) {
+    if (cause instanceof XAIAccountBannedError) {
+      return Response.json({ error: { type: "account_banned", message: cause.message } }, { status: 422 })
+    }
     const authenticationFailed = cause instanceof OpenCodeWebError && cause.code === "AUTH"
     return Response.json({
       error: {

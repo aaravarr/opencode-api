@@ -77,13 +77,13 @@ export function OverviewPage() {
                   <OverviewRow label="最早恢复" value={data.routing.nextRecoveryAt ? formatDate(data.routing.nextRecoveryAt) : "暂无明确恢复时间"} mono />
                 </div>
               ) : (
-                <EmptyState title="尚无路由状态" description="录入并验证至少一个 OpenCode Go 账号后，路由状态会显示在这里。" action={<Button asChild size="sm"><Link href="/accounts">录入账号</Link></Button>} />
+                <EmptyState title="尚无路由状态" description="录入并验证至少一个 Provider 账号后，路由状态会显示在这里。" action={<Button asChild size="sm"><Link href="/accounts">录入账号</Link></Button>} />
               )}
             </Panel>
 
             <Panel title="快捷操作" description="保持关键操作在两步以内。">
               <div className="divide-y px-1">
-                <QuickLink href="/accounts" title="连接 Go 账号" detail="通过浏览器插件登录并自动同步 Go Key" />
+                <QuickLink href="/accounts" title="管理账号池" detail="按 Provider 接入账号并查看额度状态" />
                 <QuickLink href="/routing" title="设置优先账号" detail="优先尝试，额度不足时继续自动回退" />
                 <QuickLink href="/api-keys" title="创建 API 密钥" detail="为外部客户端创建统一入口" />
               </div>

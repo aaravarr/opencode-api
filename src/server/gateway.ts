@@ -9,7 +9,7 @@ import { getLogSettings, getSystemSettings, type LogSettings } from "./settings"
 import type { QuotaKind } from "./types"
 import { collectRequestHeaders } from "./client-meta"
 import { captureJsonResponse, ensureStreamUsage, extractBodyError, extractUsage, isLogOk, safeCloneBody, teeAndCapture, type CaptureResult, type TokenUsage } from "./capture"
-import { getProvider, tryGetProvider, getProviderRegistry, type UpstreamErrorClassification } from "./providers"
+import { tryGetProvider, getProviderRegistry, type UpstreamErrorClassification } from "./providers"
 import { resolveMirrorUrl } from "./api-fetch"
 
 export interface AccessCredential { accountId: string; goApiKey: string; credentialVersion: number }
@@ -217,18 +217,19 @@ export class GatewayService {
     this.db.prepare("INSERT INTO gateway_requests(id,owner_user_id,api_key_id,endpoint,model,started_at,stream,api_key_prefix,client,user_agent,origin,request_size_bytes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
       .run(requestId, apiKey.ownerUserId, apiKey.id, endpoint, model, new Date().toISOString(), Number(stream), apiKey.prefix, meta.client, meta.userAgent, meta.origin, requestBytes?.byteLength ?? 0)
     const tried = new Set<string>()
+    const permanentlyDisabled = new Set<string>()
     let attemptNumber = 0
 
     while (true) {
       let selection
       try { selection = routing.select(requestId, endpoint, tried) } catch (cause) {
         if (cause instanceof NoEligibleAccountError) {
-          const exhausted = cause.reason === "EXHAUSTED" || tried.size > 0
+          const exhausted = cause.reason === "EXHAUSTED" || (tried.size > permanentlyDisabled.size)
           const status = exhausted ? 429 : 503
           const headers = exhausted && cause.retryAfterSeconds ? { "retry-after": String(cause.retryAfterSeconds) } : undefined
           const type = exhausted ? "all_go_accounts_exhausted" : "no_eligible_account"
           this.finalizeRequest(requestId, { status, outcome: type, attempts: attemptNumber, ok: 0, latencyMs: Date.now() - t0, localPrepMs: 0, error: type, logSettings, requestBodyJson, meta })
-          return Response.json({ error: { type, message: exhausted ? "All OpenCode Go accounts are currently quota-limited." : "No eligible OpenCode Go account is available.", ...(cause.retryAfterSeconds ? { retry_after: cause.retryAfterSeconds } : {}) } }, { status, headers })
+          return Response.json({ error: { type, message: exhausted ? "All eligible provider accounts are currently quota-limited." : "No eligible provider account is available.", ...(cause.retryAfterSeconds ? { retry_after: cause.retryAfterSeconds } : {}) } }, { status, headers })
         }
         throw cause
       }
@@ -279,6 +280,13 @@ export class GatewayService {
           const body = await upstream.text()
           const errorClass = (provider ? provider.classifyError(upstream.status, body, upstream.headers) : null)
             ?? (upstream.status === 429 ? goLimitToErrorClass(classifyGoUsageLimit(upstream, body)) : null)
+          if (errorClass?.permanentlyDisableAccount) {
+            tried.add(selection.account.id)
+            permanentlyDisabled.add(selection.account.id)
+            routing.markPermanentlyDisabled(selection.account.id, errorClass.errorType, extractBodyError(safeParse(body)) ?? body)
+            this.finishAttempt(attemptId, upstream.status, "RETRY_NEXT_ACCOUNT", errorClass.errorType, Date.now() - attemptStartedAt, "账号已被上游永久禁用", selection.account.name)
+            continue
+          }
           if (errorClass?.shouldSwitchAccount) {
             tried.add(selection.account.id)
             routing.markQuota(selection.account.id, errorClass.quotaKind ?? "UNKNOWN_GO_LIMIT", errorClass.retryAfterSeconds ?? null)
@@ -411,17 +419,18 @@ export class GatewayService {
     return Response.json({ object: "list", data: models })
   }
 
-  private recordPassiveQuota(accountId: string, windows: { kind: QuotaKind; usagePercent: number; resetInSeconds: number | null }[]): void {
+  private recordPassiveQuota(accountId: string, windows: { kind: QuotaKind; usagePercent: number; resetInSeconds: number | null; limitValue?: number | null; remainingValue?: number | null }[]): void {
     const now = new Date()
     const timestamp = now.toISOString()
     const ownerRow = this.db.prepare("SELECT owner_user_id FROM accounts WHERE id=?").get(accountId) as { owner_user_id: string } | undefined
     const ownerUserId = ownerRow?.owner_user_id ?? ""
     for (const w of windows) {
       const resetAt = w.resetInSeconds ? new Date(now.getTime() + w.resetInSeconds * 1000).toISOString() : null
-      this.db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at)
-        VALUES(?,?,?,?,?,'UPSTREAM_HEADER',?) ON CONFLICT(owner_user_id,account_id,kind) DO UPDATE SET
-        usage_percent=excluded.usage_percent,reset_at=excluded.reset_at,source='UPSTREAM_HEADER',observation_version=observation_version+1,last_observed_at=excluded.last_observed_at`)
-        .run(ownerUserId, accountId, w.kind, w.usagePercent, resetAt, timestamp)
+      this.db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at,limit_value,remaining_value)
+        VALUES(?,?,?,?,?,'UPSTREAM_HEADER',?,?,?) ON CONFLICT(owner_user_id,account_id,kind) DO UPDATE SET
+        usage_percent=excluded.usage_percent,reset_at=excluded.reset_at,source='UPSTREAM_HEADER',limit_value=excluded.limit_value,
+        remaining_value=excluded.remaining_value,observation_version=observation_version+1,last_observed_at=excluded.last_observed_at`)
+        .run(ownerUserId, accountId, w.kind, w.usagePercent, resetAt, timestamp, w.limitValue ?? null, w.remainingValue ?? null)
     }
   }
 }

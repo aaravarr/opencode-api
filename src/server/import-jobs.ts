@@ -1,0 +1,348 @@
+import { createHash, randomUUID } from "node:crypto"
+import type { AppDatabase } from "./db"
+import { getDatabase } from "./db"
+import { SecretVault } from "./crypto"
+import { AccountRepository, ProviderCredentialRepository } from "./repository"
+import type { PoolType } from "./types"
+import { convertSsoToBuild, decodeJwtClaims, jwtClaimString } from "./xai-sso-device"
+import { exchangeXaiRefreshToken } from "./providers/xai-grok"
+import { syncProviderAccount } from "./provider-sync"
+import { tryGetProvider } from "./providers"
+
+export const IMPORT_FORMATS = ["sub2api-json", "cpa-json", "refresh-token", "xai-sso"] as const
+export type ImportFormat = (typeof IMPORT_FORMATS)[number]
+export type ImportJobStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED"
+
+interface ImportSeed {
+  label: string
+  poolType: PoolType
+  accessToken?: string
+  refreshToken?: string
+  clientId?: string
+  expiresAt?: string
+  idToken?: string
+  tokenType?: string
+  scope?: string
+  email?: string
+  subject?: string
+  ssoToken?: string
+  concurrency?: number
+}
+
+interface ImportJobRow {
+  id: string
+  owner_user_id: string
+  pool_type: PoolType
+  format: ImportFormat
+  status: ImportJobStatus
+  total_items: number
+  processed_items: number
+  succeeded_items: number
+  failed_items: number
+  current_step: string | null
+  error: string | null
+  payload_ciphertext: string
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+  updated_at: string
+}
+
+type JsonRecord = Record<string, unknown>
+const MAX_IMPORT_ITEMS = 10_000
+const nowIso = () => new Date().toISOString()
+const stringValue = (value: unknown) => typeof value === "string" ? value.trim() : ""
+const recordValue = (value: unknown): JsonRecord => value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : {}
+const firstString = (record: JsonRecord, ...keys: string[]) => {
+  for (const key of keys) {
+    const value = stringValue(record[key])
+    if (value) return value
+  }
+  return ""
+}
+
+function parseJson(input: string): unknown {
+  try { return JSON.parse(input.replace(/^\uFEFF/, "")) }
+  catch { throw new Error("JSON 格式无效，请检查文件内容") }
+}
+
+function parseJsonOrSequence(input: string): unknown {
+  try { return JSON.parse(input.replace(/^\uFEFF/, "")) }
+  catch {
+    const lines = input.split(/\r?\n/).map((line) => line.trim().replace(/,$/, "")).filter(Boolean)
+    if (lines.length < 2) throw new Error("JSON 格式无效，请检查文件内容")
+    try { return lines.map((line) => JSON.parse(line) as unknown) }
+    catch { throw new Error("JSON / JSONL 格式无效，请检查文件内容") }
+  }
+}
+
+function normalizeExpiry(value: string, expiresIn?: number): string | undefined {
+  if (value) {
+    if (/^\d+$/.test(value)) {
+      const numeric = Number(value)
+      return String(numeric > 1_000_000_000_000 ? Math.floor(numeric / 1000) : numeric)
+    }
+    const parsed = Date.parse(value)
+    if (!Number.isNaN(parsed)) return String(Math.floor(parsed / 1000))
+  }
+  return expiresIn && expiresIn > 0 ? String(Math.floor(Date.now() / 1000) + expiresIn) : undefined
+}
+
+function poolForSub2Account(account: JsonRecord): PoolType | null {
+  const platform = firstString(account, "platform").toLowerCase()
+  const type = firstString(account, "type").toLowerCase()
+  const credentials = recordValue(account.credentials)
+  if (platform === "grok" || platform === "xai") return credentials.refresh_token || credentials.access_token ? "xai-grok" : null
+  if (platform !== "openai") return null
+  const authMode = firstString(credentials, "auth_mode").toLowerCase()
+  if (credentials.refresh_token && type === "oauth" && authMode !== "personalaccesstoken" && authMode !== "personal_access_token") return "openai-oauth"
+  return credentials.access_token || credentials.api_key ? "openai-cpa" : null
+}
+
+function seedFromCredential(record: JsonRecord, poolType: PoolType, fallbackLabel: string): ImportSeed {
+  const expiresInRaw = record.expires_in
+  const expiresIn = typeof expiresInRaw === "number" ? expiresInRaw : Number(expiresInRaw || 0)
+  const email = firstString(record, "email")
+  return {
+    label: firstString(record, "name", "label") || email || fallbackLabel,
+    poolType,
+    accessToken: firstString(record, "access_token", "accessToken", "token", "api_key"),
+    refreshToken: firstString(record, "refresh_token", "refreshToken"),
+    clientId: firstString(record, "client_id", "clientId"),
+    expiresAt: normalizeExpiry(firstString(record, "expires_at", "expired", "expiresAt"), expiresIn),
+    idToken: firstString(record, "id_token", "idToken"),
+    tokenType: firstString(record, "token_type", "tokenType"),
+    scope: firstString(record, "scope"),
+    email,
+    subject: firstString(record, "sub", "subject", "user_id", "principal_id"),
+    concurrency: typeof record.concurrency === "number" ? record.concurrency : undefined,
+  }
+}
+
+function parseSub2Api(input: string, selectedPool: PoolType): ImportSeed[] {
+  const root = recordValue(parseJson(input))
+  if (!Array.isArray(root.accounts)) throw new Error("Sub2API JSON 缺少 accounts 数组")
+  const seeds: ImportSeed[] = []
+  for (const [index, raw] of root.accounts.entries()) {
+    const account = recordValue(raw)
+    const poolType = poolForSub2Account(account)
+    if (!poolType || poolType !== selectedPool) continue
+    const credentials = recordValue(account.credentials)
+    const seed = seedFromCredential({ ...credentials, name: firstString(account, "name"), concurrency: account.concurrency }, poolType, `账号 #${index + 1}`)
+    if (!seed.accessToken && !seed.refreshToken) continue
+    seeds.push(seed)
+  }
+  if (!seeds.length) throw new Error(`文件中没有可导入到 ${selectedPool} 的账号`)
+  return seeds
+}
+
+function parseCpaJson(input: string, selectedPool: PoolType): ImportSeed[] {
+  if (selectedPool !== "xai-grok") throw new Error("CPA JSON 当前仅用于 xAI Grok 号池")
+  const parsed = parseJsonOrSequence(input)
+  const root = recordValue(parsed)
+  const topLevelValues = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(root.accounts)
+      ? root.accounts
+      : Array.isArray(root.auths)
+        ? root.auths
+        : [parsed]
+  const values = topLevelValues.flatMap((value) => {
+    const wrapper = recordValue(value)
+    return Array.isArray(wrapper.accounts) ? wrapper.accounts : [value]
+  })
+  const seeds = values.map((raw, index) => seedFromCredential(recordValue(raw), "xai-grok", `xAI 账号 #${index + 1}`))
+    .filter((seed) => seed.accessToken || seed.refreshToken)
+  if (!seeds.length) throw new Error("CPA JSON 中没有 access_token 或 refresh_token")
+  return seeds
+}
+
+export function parseImportInput(poolType: PoolType, format: ImportFormat, input: string): ImportSeed[] {
+  if (!input.trim()) throw new Error("导入内容不能为空")
+  let seeds: ImportSeed[]
+  if (format === "sub2api-json") seeds = parseSub2Api(input, poolType)
+  else if (format === "cpa-json") seeds = parseCpaJson(input, poolType)
+  else {
+    if (poolType !== "xai-grok") throw new Error("此导入方式仅支持 xAI Grok")
+    const values = input.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
+    seeds = values.map((value, index) => format === "xai-sso"
+      ? { label: `SSO #${index + 1}`, poolType, ssoToken: value }
+      : { label: `Refresh Token #${index + 1}`, poolType, refreshToken: value.replace(/^refresh_token\s*[=:]\s*/i, "") })
+  }
+  if (seeds.length > MAX_IMPORT_ITEMS) throw new Error(`单次最多导入 ${MAX_IMPORT_ITEMS} 个账号`)
+  return seeds
+}
+
+function publicJob(row: ImportJobRow, db: AppDatabase, withItems = true) {
+  const items = withItems ? db.prepare(`SELECT item_index AS itemIndex,label,status,step,account_id AS accountId,error,updated_at AS updatedAt
+    FROM import_job_items WHERE job_id=? ORDER BY item_index`).all(row.id) : undefined
+  return {
+    id: row.id,
+    poolType: row.pool_type,
+    format: row.format,
+    status: row.status,
+    totalItems: row.total_items,
+    processedItems: row.processed_items,
+    succeededItems: row.succeeded_items,
+    failedItems: row.failed_items,
+    currentStep: row.current_step,
+    error: row.error,
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    updatedAt: row.updated_at,
+    ...(withItems ? { items } : {}),
+  }
+}
+
+export function getImportJob(ownerUserId: string, jobId: string, db: AppDatabase = getDatabase()) {
+  const row = db.prepare("SELECT * FROM import_jobs WHERE id=? AND owner_user_id=?").get(jobId, ownerUserId) as ImportJobRow | undefined
+  return row ? publicJob(row, db) : null
+}
+
+export function listImportJobs(ownerUserId: string, db: AppDatabase = getDatabase(), limit = 10) {
+  const rows = db.prepare("SELECT * FROM import_jobs WHERE owner_user_id=? ORDER BY created_at DESC LIMIT ?").all(ownerUserId, Math.max(1, Math.min(limit, 50))) as ImportJobRow[]
+  return rows.map((row) => publicJob(row, db, false))
+}
+
+export function createImportJob(ownerUserId: string, poolType: PoolType, format: ImportFormat, input: string, db: AppDatabase = getDatabase()) {
+  const seeds = parseImportInput(poolType, format, input)
+  const id = randomUUID()
+  const timestamp = nowIso()
+  const ciphertext = new SecretVault().encrypt(JSON.stringify(seeds))
+  db.transaction(() => {
+    db.prepare(`INSERT INTO import_jobs(id,owner_user_id,pool_type,format,status,total_items,payload_ciphertext,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?)`).run(id, ownerUserId, poolType, format, "QUEUED", seeds.length, ciphertext, timestamp, timestamp)
+    const insert = db.prepare(`INSERT INTO import_job_items(id,job_id,item_index,label,status,step,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`)
+    seeds.forEach((seed, index) => insert.run(randomUUID(), id, index, seed.label, "QUEUED", "等待处理", timestamp, timestamp))
+  })()
+  void runImportJob(id, db)
+  return getImportJob(ownerUserId, id, db)!
+}
+
+function updateItem(db: AppDatabase, jobId: string, index: number, status: string, step: string, accountId?: string | null, error?: string | null) {
+  const timestamp = nowIso()
+  db.prepare("UPDATE import_job_items SET status=?,step=?,account_id=COALESCE(?,account_id),error=?,updated_at=? WHERE job_id=? AND item_index=?")
+    .run(status, step, accountId ?? null, error ?? null, timestamp, jobId, index)
+  const counts = db.prepare(`SELECT COUNT(*) AS total,SUM(CASE WHEN status IN ('COMPLETED','FAILED') THEN 1 ELSE 0 END) AS processed,
+    SUM(CASE WHEN status='COMPLETED' THEN 1 ELSE 0 END) AS succeeded,SUM(CASE WHEN status='FAILED' THEN 1 ELSE 0 END) AS failed
+    FROM import_job_items WHERE job_id=?`).get(jobId) as { total: number; processed: number; succeeded: number; failed: number }
+  db.prepare("UPDATE import_jobs SET processed_items=?,succeeded_items=?,failed_items=?,current_step=?,updated_at=? WHERE id=?")
+    .run(counts.processed || 0, counts.succeeded || 0, counts.failed || 0, step, timestamp, jobId)
+}
+
+function decodeIdentity(seed: ImportSeed): { email: string; subject: string } {
+  for (const token of [seed.idToken, seed.accessToken]) {
+    if (!token) continue
+    const claims = decodeJwtClaims(token)
+    if (claims) return { email: seed.email || jwtClaimString(claims, "email"), subject: seed.subject || jwtClaimString(claims, "sub") }
+  }
+  return { email: seed.email || "", subject: seed.subject || "" }
+}
+
+function externalId(seed: ImportSeed, email: string, subject: string): string {
+  const identity = subject || email.toLowerCase() || seed.refreshToken || seed.accessToken || randomUUID()
+  return createHash("sha256").update(`${seed.poolType}:${identity}`).digest("hex").slice(0, 24)
+}
+
+async function importSeed(ownerUserId: string, jobId: string, index: number, initial: ImportSeed, db: AppDatabase): Promise<string> {
+  const accounts = new AccountRepository(ownerUserId, db)
+  const credentials = new ProviderCredentialRepository(ownerUserId, db)
+  let seed = { ...initial }
+  if (seed.ssoToken) {
+    updateItem(db, jobId, index, "RUNNING", "正在兑换 xAI SSO")
+    const result = await convertSsoToBuild(seed.ssoToken)
+    seed = { ...seed, accessToken: result.accessToken, refreshToken: result.refreshToken, idToken: result.idToken, tokenType: result.tokenType, scope: result.scope, expiresAt: normalizeExpiry("", result.expiresIn) }
+  }
+  if (!seed.accessToken && seed.refreshToken && seed.poolType === "xai-grok") {
+    updateItem(db, jobId, index, "RUNNING", "正在刷新 OAuth 凭据")
+    const result = await exchangeXaiRefreshToken(seed.refreshToken, seed.clientId)
+    seed = { ...seed, ...result, idToken: result.idToken || seed.idToken }
+  }
+  if (!seed.accessToken) throw new Error("凭据缺少可用的 access_token")
+
+  const identity = decodeIdentity(seed)
+  const accountName = identity.email || seed.label
+  updateItem(db, jobId, index, "RUNNING", "正在保存加密凭据")
+  const account = accounts.createProviderAccount({
+    name: accountName,
+    poolType: seed.poolType,
+    email: identity.email || null,
+    externalId: externalId(seed, identity.email, identity.subject),
+  })
+  const credentialData: Record<string, string> = { token: seed.accessToken }
+  if (seed.refreshToken) credentialData.refreshToken = seed.refreshToken
+  if (seed.clientId) credentialData.clientId = seed.clientId
+  if (seed.expiresAt) credentialData.expiresAt = seed.expiresAt
+  if (identity.email) credentialData.email = identity.email
+  if (seed.idToken) credentialData.idToken = seed.idToken
+  if (seed.tokenType) credentialData.tokenType = seed.tokenType
+  if (seed.scope) credentialData.scope = seed.scope
+  credentials.upsert({ accountId: account.id, poolType: seed.poolType, credentialData })
+  if (seed.concurrency && seed.concurrency > 0) accounts.updateState(account.id, { maxConcurrency: Math.min(64, seed.concurrency) })
+
+  updateItem(db, jobId, index, "RUNNING", seed.poolType === "xai-grok" ? "正在探测真实额度" : "正在验证账号", account.id)
+  if (seed.poolType === "xai-grok") {
+    await syncProviderAccount(ownerUserId, account.id, db)
+  } else {
+    const provider = tryGetProvider(seed.poolType)
+    const latest = accounts.get(account.id)
+    if (provider && latest) {
+      const validation = await provider.validateCredential(latest)
+      if (!validation.valid) throw new Error("上游未接受该账号凭据")
+    }
+  }
+  return account.id
+}
+
+const runnerGlobal = globalThis as typeof globalThis & { __accountImportJobs?: Set<string> }
+const activeJobs = (runnerGlobal.__accountImportJobs ??= new Set<string>())
+
+export async function runImportJob(jobId: string, db: AppDatabase = getDatabase()): Promise<void> {
+  if (activeJobs.has(jobId)) return
+  const claimed = db.prepare("UPDATE import_jobs SET status='RUNNING',started_at=COALESCE(started_at,?),current_step='正在准备导入',updated_at=? WHERE id=? AND status='QUEUED'")
+    .run(nowIso(), nowIso(), jobId).changes
+  if (!claimed) return
+  activeJobs.add(jobId)
+  try {
+    const job = db.prepare("SELECT * FROM import_jobs WHERE id=?").get(jobId) as ImportJobRow
+    const seeds = JSON.parse(new SecretVault().decrypt(job.payload_ciphertext)) as ImportSeed[]
+    const terminalItems = new Set((db.prepare("SELECT item_index FROM import_job_items WHERE job_id=? AND status IN ('COMPLETED','FAILED')").all(jobId) as { item_index: number }[]).map((item) => item.item_index))
+    let cursor = 0
+    const workers = Array.from({ length: Math.min(3, seeds.length) }, async () => {
+      for (;;) {
+        const index = cursor++
+        if (index >= seeds.length) return
+        if (terminalItems.has(index)) continue
+        try {
+          updateItem(db, jobId, index, "RUNNING", "正在读取账号凭据")
+          const accountId = await importSeed(job.owner_user_id, jobId, index, seeds[index], db)
+          updateItem(db, jobId, index, "COMPLETED", "导入完成", accountId)
+        } catch (cause) {
+          const message = cause instanceof Error ? cause.message : "导入失败"
+          updateItem(db, jobId, index, "FAILED", "导入失败", null, message)
+        }
+      }
+    })
+    await Promise.all(workers)
+    const counts = db.prepare("SELECT succeeded_items,failed_items FROM import_jobs WHERE id=?").get(jobId) as { succeeded_items: number; failed_items: number }
+    const timestamp = nowIso()
+    db.prepare("UPDATE import_jobs SET status='COMPLETED',current_step=?,completed_at=?,updated_at=?,payload_ciphertext=? WHERE id=?")
+      .run(counts.failed_items ? "导入完成，部分账号失败" : "全部导入完成", timestamp, timestamp, new SecretVault().encrypt("[]"), jobId)
+  } catch (cause) {
+    const timestamp = nowIso()
+    db.prepare("UPDATE import_jobs SET status='FAILED',error=?,current_step='任务异常终止',completed_at=?,updated_at=?,payload_ciphertext=? WHERE id=?")
+      .run(cause instanceof Error ? cause.message : "导入任务失败", timestamp, timestamp, new SecretVault().encrypt("[]"), jobId)
+  } finally {
+    activeJobs.delete(jobId)
+  }
+}
+
+export function startImportJobRunner(db: AppDatabase = getDatabase()): void {
+  db.transaction(() => {
+    db.prepare("UPDATE import_jobs SET status='QUEUED',current_step='服务重启，等待恢复',updated_at=? WHERE status='RUNNING'").run(nowIso())
+    db.prepare("UPDATE import_job_items SET status='QUEUED',step='等待恢复',updated_at=? WHERE status='RUNNING'").run(nowIso())
+  })()
+  const jobs = db.prepare("SELECT id FROM import_jobs WHERE status='QUEUED' ORDER BY created_at").all() as { id: string }[]
+  for (const job of jobs) void runImportJob(job.id, db)
+}

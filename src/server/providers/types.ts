@@ -21,6 +21,8 @@ export interface QuotaWindow {
   resetInSeconds: number | null
   lastObservedAt: string
   source: "DASHBOARD" | "UPSTREAM_429" | "UPSTREAM_HEADER" | "API_PROBE"
+  limitValue?: number | null
+  remainingValue?: number | null
 }
 
 // Credential
@@ -38,6 +40,7 @@ export interface UpstreamErrorClassification {
   quotaKind?: QuotaKind
   retryAfterSeconds?: number | null
   errorType: string
+  permanentlyDisableAccount?: boolean
 }
 
 // Forward Request

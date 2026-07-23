@@ -2,9 +2,7 @@ import { getDatabase } from "@/server/db"
 import { getOpenCodeWebService, type OpenCodeWebService } from "@/server/opencode-web/service"
 import { listDueUsageCandidates } from "@/server/repository"
 import { getSystemSettings } from "@/server/settings"
-import { tryGetProvider } from "@/server/providers"
-import { AccountRepository } from "@/server/repository"
-import type { QuotaKind } from "@/server/types"
+import { syncProviderAccount } from "@/server/provider-sync"
 
 export interface RefreshUsageBatchResult {
   attempted: number
@@ -34,27 +32,7 @@ export async function refreshDueUsage(options: {
         if (item.poolType === "opencode-go") {
           await serviceFactory(item.ownerUserId).refreshUsage(item.accountId)
         } else {
-          // For non-OpenCode providers, use the provider's refreshQuota and persist results.
-          const provider = tryGetProvider(item.poolType as never)
-          if (provider) {
-            const accountRepo = new AccountRepository(item.ownerUserId, db2)
-            const account = accountRepo.get(item.accountId)
-            if (account) {
-              const windows = await provider.refreshQuota(item.accountId, account)
-              if (windows.length) {
-                const nowStr = new Date().toISOString()
-                for (const w of windows) {
-                  db2.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at)
-                    VALUES(?,?,?,?,?,?,?) ON CONFLICT(owner_user_id,account_id,kind) DO UPDATE SET
-                    usage_percent=excluded.usage_percent,reset_at=excluded.reset_at,source=excluded.source,
-                    observation_version=observation_version+1,last_observed_at=excluded.last_observed_at`)
-                    .run(item.ownerUserId, item.accountId, w.kind, w.usagePercent, w.resetAt, w.source, w.lastObservedAt)
-                }
-                db2.prepare("UPDATE accounts SET last_usage_check_at=?,next_usage_check_at=?,auth_state='VALID',updated_at=? WHERE id=? AND owner_user_id=?")
-                  .run(nowStr, new Date(Date.now() + 5 * 60_000).toISOString(), nowStr, item.accountId, item.ownerUserId)
-              }
-            }
-          }
+          await syncProviderAccount(item.ownerUserId, item.accountId, db2)
         }
         refreshed += 1
       } catch (cause) {

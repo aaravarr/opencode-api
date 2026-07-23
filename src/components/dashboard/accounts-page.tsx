@@ -30,14 +30,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { PageIntro, Panel, ErrorState, LoadingTable, EmptyState, formatDate } from "./page-kit";
-import { AccountBadges, BillingSafetyBadge, getPoolQuotaKinds, getQuota, PoolTypeBadge, QuotaStatus, StatusBadge } from "./status-ui";
+import { AccountBadges, BillingSafetyBadge, getPoolLabel, getPoolQuotaKinds, getQuota, PoolTypeBadge, QuotaStatus, StatusBadge } from "./status-ui";
 import { useAdminResource } from "./use-admin-resource";
 import { useAdmin } from "./admin-context";
 import type { Account } from "./types";
+import { ImportJobProgress, ImportTaskCenter, type ImportJob, useImportJobStream } from "./import-task-center";
 
 interface AccountsPayload { accounts?: Account[]; poolPreferences?: Record<string, string | null>; poolTypes?: { type: string; label: string; description: string; quotaKinds: string[] }[] }
-interface PoolTypeMeta { type: string; label: string; description: string; quotaKinds: string[] }
-
 const POOL_FILTERS = [
   { key: "all", label: "全部" },
   { key: "opencode-go", label: "OpenCode Go" },
@@ -45,6 +44,8 @@ const POOL_FILTERS = [
   { key: "openai-oauth", label: "OpenAI OAuth" },
   { key: "xai-grok", label: "xAI Grok" },
 ] as const;
+
+type XaiImportFormat = "cpa-json" | "refresh-token" | "xai-sso";
 
 function poolOf(account: Account) {
   return account.poolType || "opencode-go";
@@ -58,7 +59,8 @@ export function AccountsPage() {
  const [selected, setSelected] = useState<Account | null>(null);
  const [connectorOpen, setConnectorOpen] = useState(false);
 const [importOpen, setImportOpen] = useState(false);
-const [ssoImportOpen, setSsoImportOpen] = useState(false);
+const [xaiImportFormat, setXaiImportFormat] = useState<XaiImportFormat | null>(null);
+const [jobVersion, setJobVersion] = useState(0);
 const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const accounts = resource.data?.accounts ?? [];
@@ -161,28 +163,34 @@ const [busyId, setBusyId] = useState<string | null>(null);
       <PageIntro
         eyebrow="ACCOUNT POOL"
         title="多 Provider 账号池"
-        description="支持 OpenCode Go、OpenAI CPA 等多种号池。浏览器插件负责 Google 登录和 Console 会话同步；导入账号通过 Sub2API JSON 批量接入。"
+        description="按 Provider 独立管理凭据、额度、导入与调度。先选择号池，再使用该 Provider 支持的接入方式。"
         actions={
           <div className="flex gap-2">
             <Button variant="outline" size="sm" onClick={() => void resource.refresh()} disabled={resource.loading}>
               <RefreshCw data-icon="inline-start" />刷新缓存
             </Button>
-            {downloadInfo ? (
+            {downloadInfo && poolFilter === "opencode-go" ? (
               <Button variant="outline" size="sm" asChild>
                 <a href={downloadInfo.downloadUrl} target="_blank" rel="noopener noreferrer" download>
                   <Download data-icon="inline-start" />下载插件{downloadInfo.version ? ` v${downloadInfo.version}` : ""}
                 </a>
               </Button>
             ) : null}
-           <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
-             <Upload data-icon="inline-start" />导入 Sub2API JSON
-           </Button>
-            <Button variant="outline" size="sm" onClick={() => setSsoImportOpen(true)}>
-              <KeyRound data-icon="inline-start" />导入 xAI SSO
-            </Button>
-           <Button size="sm" onClick={() => setConnectorOpen(true)}>
-             <Puzzle data-icon="inline-start" />连接 Go 账号
-           </Button>
+            {poolFilter === "opencode-go" ? (
+              <Button size="sm" onClick={() => setConnectorOpen(true)}><Puzzle data-icon="inline-start" />连接 Go 账号</Button>
+            ) : poolFilter === "openai-cpa" || poolFilter === "openai-oauth" ? (
+              <Button size="sm" onClick={() => setImportOpen(true)}><Upload data-icon="inline-start" />导入 Sub2API JSON</Button>
+            ) : poolFilter === "xai-grok" ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild><Button size="sm"><Upload data-icon="inline-start" />导入 xAI 账号</Button></DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => setXaiImportFormat("cpa-json")}><FileUp />CPA JSON</DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => setImportOpen(true)}><FileUp />Sub2API JSON</DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => setXaiImportFormat("refresh-token")}><KeyRound />Refresh Token</DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => setXaiImportFormat("xai-sso")}><KeyRound />xAI SSO</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
           </div>
         }
       />
@@ -207,13 +215,15 @@ const [busyId, setBusyId] = useState<string | null>(null);
 
       {actionError ? <div className="mb-4 rounded-md border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive" role="alert">{actionError}</div> : null}
 
+      <ImportTaskCenter version={jobVersion} onAccountsChanged={() => void resource.refresh()} />
+
       <Panel
         title="账号"
-        description={`${filtered.length} 个账号。额度达到 100% 时自动切换，其他上游错误原样返回。`}
+        description={`${filtered.length} 个账号。额度耗尽和账号异常会自动切换，永久封禁账号会从调度中移除。`}
         action={
           <div className="relative w-full sm:w-64">
             <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
-            <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索账号或 workspace" className="h-8 rounded-md bg-white pl-8 text-xs" />
+            <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索账号、邮箱或标识" className="h-8 rounded-md bg-white pl-8 text-xs" />
           </div>
         }
       >
@@ -222,13 +232,14 @@ const [busyId, setBusyId] = useState<string | null>(null);
         {!resource.loading && !resource.error && !filtered.length ? (
           <EmptyState
             title={accounts.length ? "没有匹配的账号" : "还没有账号"}
-            description={accounts.length ? "调整搜索条件或切换号池筛选后重试。" : "通过浏览器插件连接 OpenCode Go 账号，或导入 OpenAI 账号。"}
-            action={!accounts.length ? (
-              <div className="flex gap-2">
-                <Button size="sm" onClick={() => setConnectorOpen(true)}><Puzzle data-icon="inline-start" />查看插件接入方式</Button>
-                <Button size="sm" onClick={() => setImportOpen(true)}><Upload data-icon="inline-start" />导入账号</Button>
-              </div>
-            ) : undefined}
+            description={accounts.length ? "调整搜索条件或切换号池筛选后重试。" : "先选择号池，再使用该 Provider 支持的方式接入账号。"}
+            action={!accounts.length ? poolFilter === "opencode-go" ? (
+              <Button size="sm" onClick={() => setConnectorOpen(true)}><Puzzle />连接 Go 账号</Button>
+            ) : poolFilter === "xai-grok" ? (
+              <Button size="sm" onClick={() => setXaiImportFormat("cpa-json")}><Upload />导入 xAI 账号</Button>
+            ) : poolFilter === "openai-cpa" || poolFilter === "openai-oauth" ? (
+              <Button size="sm" onClick={() => setImportOpen(true)}><Upload />导入 Sub2API JSON</Button>
+            ) : <span className="text-xs text-muted-foreground">请先在上方选择一个号池。</span> : undefined}
           />
         ) : null}
         {!resource.loading && !resource.error && filtered.length ? (
@@ -238,10 +249,10 @@ const [busyId, setBusyId] = useState<string | null>(null);
                 <TableHead className="w-[230px] px-4 text-xs text-muted-foreground">账号</TableHead>
                 <TableHead className="w-[110px] text-xs text-muted-foreground">号池</TableHead>
                 <TableHead className="w-[150px] text-xs text-muted-foreground">状态</TableHead>
-                <TableHead className="text-xs text-muted-foreground">5 小时</TableHead>
-                <TableHead className="text-xs text-muted-foreground">周</TableHead>
+                <TableHead className="text-xs text-muted-foreground">{poolFilter === "xai-grok" ? "滚动 24 小时" : poolFilter === "all" ? "主额度窗口" : "5 小时"}</TableHead>
+                <TableHead className="text-xs text-muted-foreground">{poolFilter === "xai-grok" ? "其他窗口" : poolFilter === "all" ? "次额度窗口" : "周"}</TableHead>
                 {showMonthly ? <TableHead className="text-xs text-muted-foreground">月</TableHead> : null}
-                <TableHead className="w-[150px] text-xs text-muted-foreground">订阅与回退</TableHead>
+                <TableHead className="w-[150px] text-xs text-muted-foreground">订阅 / 凭据</TableHead>
                 <TableHead className="w-[130px] text-xs text-muted-foreground">最近同步</TableHead>
                 <TableHead className="w-14 px-4 text-right text-xs text-muted-foreground">操作</TableHead>
               </TableRow>
@@ -292,9 +303,9 @@ const [busyId, setBusyId] = useState<string | null>(null);
                           <DropdownMenuItem onSelect={() => setSelected(account)}><Eye />查看详情</DropdownMenuItem>
                           <DropdownMenuItem onSelect={() => void setPreferred(account)}><Star />设为优先账号</DropdownMenuItem>
                           <DropdownMenuSeparator />
-                          <DropdownMenuItem onSelect={() => void patchAccount(account, { adminState: account.adminState === "DISABLED" ? "ENABLED" : "DISABLED" })}>
+                          {account.disabledReason !== "XAI_ACCOUNT_BANNED" ? <DropdownMenuItem onSelect={() => void patchAccount(account, { adminState: account.adminState === "DISABLED" ? "ENABLED" : "DISABLED" })}>
                             <CircleOff />{account.adminState === "DISABLED" ? "启用账号" : "停用账号"}
-                          </DropdownMenuItem>
+                          </DropdownMenuItem> : null}
                           <DropdownMenuSeparator />
                           <DropdownMenuItem className="text-destructive" onSelect={() => void deleteAccount(account)}>
                             <Trash2 />删除账号
@@ -311,8 +322,8 @@ const [busyId, setBusyId] = useState<string | null>(null);
       </Panel>
 
       <ConnectorSheet open={connectorOpen} onOpenChange={setConnectorOpen} downloadInfo={downloadInfo} />
-     <Sub2ApiImportDialog open={importOpen} onOpenChange={setImportOpen} onCreated={() => void resource.refresh()} />
-      <XaiSsoImportDialog open={ssoImportOpen} onOpenChange={setSsoImportOpen} onCreated={() => void resource.refresh()} />
+     <Sub2ApiImportDialog open={importOpen} poolType={poolFilter === "all" ? "openai-cpa" : poolFilter} onOpenChange={setImportOpen} onCreated={() => setJobVersion((value) => value + 1)} />
+      <XaiSsoImportDialog format={xaiImportFormat} open={Boolean(xaiImportFormat)} onOpenChange={(open) => { if (!open) setXaiImportFormat(null); }} onCreated={() => setJobVersion((value) => value + 1)} />
      <AccountDetailSheet
         account={selected}
         onOpenChange={(open) => { if (!open) setSelected(null); }}
@@ -377,7 +388,7 @@ function AccountDetailSheet({ account, onOpenChange, onPreferred, onToggle, onRe
   busy: boolean;
 }) {
   const quotaKinds = account ? getPoolQuotaKinds(account.poolType) : ["fiveHour", "weekly", "monthly"];
-  const isCpa = account ? poolOf(account) === "openai-cpa" : false;
+  const isGo = account ? poolOf(account) === "opencode-go" : false;
 
   return (
     <Dialog open={Boolean(account)} onOpenChange={onOpenChange}>
@@ -389,14 +400,14 @@ function AccountDetailSheet({ account, onOpenChange, onPreferred, onToggle, onRe
             </DialogHeader>
             <div className="scrollbar-thin max-h-[calc(88dvh-160px)] space-y-5 overflow-y-auto px-5 py-5">
               <div className="flex flex-wrap gap-2"><PoolTypeBadge poolType={account.poolType} /><AccountBadges account={account} /><BillingSafetyBadge account={account} /></div>
-              {!isCpa && account.billingGuard !== "VERIFIED_GO_ONLY" ? (
+              {isGo && account.billingGuard !== "VERIFIED_GO_ONLY" ? (
                 <div className="rounded-md border border-warning/25 bg-warning-soft px-3.5 py-3 text-xs leading-5 text-foreground">
                   {account.useBalance === true
                     ? "按量回退已开启。为避免产生额外费用，该账号不会参与路由；请先在 OpenCode Go 控制台关闭 Use balance，再立即同步。"
                     : "尚未取得 Use balance 状态，因此暂不参与路由。服务重启完成字段升级后，点击下方“立即同步”即可重新读取，无需重新录入账号。"}
                 </div>
               ) : null}
-              <DetailSection title="额度窗口" description="来自最近一次 Console 同步，不会为打开侧栏额外请求上游。">
+              <DetailSection title="额度窗口" description={isGo ? "来自最近一次 Console 同步。" : "来自真实上游响应头；立即同步会发送一次最小额度探测。"}>
                 <div className="grid grid-cols-[repeat(auto-fit,minmax(148px,1fr))] gap-2.5">
                   {quotaKinds.includes("fiveHour") ? <div className="min-w-0 rounded-md border bg-[#fafafa] p-3.5"><QuotaStatus label="5 小时" quota={getQuota(account, "fiveHour")} variant="card" /></div> : null}
                   {quotaKinds.includes("weekly") ? <div className="min-w-0 rounded-md border bg-[#fafafa] p-3.5"><QuotaStatus label="每周" quota={getQuota(account, "weekly")} variant="card" /></div> : null}
@@ -404,7 +415,7 @@ function AccountDetailSheet({ account, onOpenChange, onPreferred, onToggle, onRe
                   {quotaKinds.includes("rolling24h") ? <div className="min-w-0 rounded-md border bg-[#fafafa] p-3.5"><QuotaStatus label="滚动 24 小时" quota={getQuota(account, "rolling24h")} variant="card" /></div> : null}
                 </div>
               </DetailSection>
-              {!isCpa ? (
+              {isGo ? (
                 <>
                   <DetailSection title="订阅与计费">
                     <div className="divide-y rounded-md border">
@@ -428,7 +439,10 @@ function AccountDetailSheet({ account, onOpenChange, onPreferred, onToggle, onRe
               ) : (
                 <DetailSection title="连接信息">
                   <div className="divide-y rounded-md border">
-                    <DetailRow label="号池类型" value="OpenAI CPA" />
+                    <DetailRow label="号池类型" value={getPoolLabel(account.poolType)} />
+                    <DetailRow label="凭据状态" value={account.authState === "VALID" ? "有效" : account.authState || "未知"} />
+                    {account.disabledReason ? <DetailRow label="停用原因" value={account.disabledReason === "XAI_ACCOUNT_BANNED" ? "xAI 上游已封禁此账号" : account.disabledReason} /> : null}
+                    {account.lastError ? <DetailRow label="最近错误" value={account.lastError} /> : null}
                     <DetailRow label="最近同步" value={formatDate(account.lastSyncedAt)} mono />
                     <DetailRow label="最近额度检查" value={formatDate(account.lastUsageCheckAt)} mono />
                   </div>
@@ -437,7 +451,7 @@ function AccountDetailSheet({ account, onOpenChange, onPreferred, onToggle, onRe
             </div>
             <DialogFooter className="mb-0 flex-row flex-wrap border-t bg-[#fafafa] px-5 py-4 sm:mx-0 sm:justify-start">
               <Button variant="outline" onClick={() => void onRefresh(account)} disabled={busy}><RefreshCw className={busy ? "animate-spin" : undefined} data-icon="inline-start" />{busy ? "同步中" : "立即同步"}</Button>
-              <Button variant="outline" onClick={() => void onToggle(account)} disabled={busy}>{account.adminState === "DISABLED" ? "启用账号" : "停用账号"}</Button>
+              <Button variant="outline" onClick={() => void onToggle(account)} disabled={busy || account.disabledReason === "XAI_ACCOUNT_BANNED"}>{account.disabledReason === "XAI_ACCOUNT_BANNED" ? "账号已永久封禁" : account.adminState === "DISABLED" ? "启用账号" : "停用账号"}</Button>
               <Button onClick={() => void onPreferred(account)} disabled={busy}><Star data-icon="inline-start" />设为优先</Button>
               <Button variant="outline" className="text-destructive" onClick={() => void onDelete(account)} disabled={busy}><Trash2 data-icon="inline-start" />删除账号</Button>
             </DialogFooter>
@@ -456,19 +470,20 @@ function DetailRow({ label, value, mono }: { label: string; value: string; mono?
   return <div className="grid gap-1 px-3 py-2.5 sm:grid-cols-[150px_minmax(0,1fr)]"><span className="text-xs text-muted-foreground">{label}</span><span className={`min-w-0 break-all text-sm sm:text-right ${mono ? "font-mono text-xs" : ""}`}>{value}</span></div>;
 }
 
-function Sub2ApiImportDialog({ open, onOpenChange, onCreated }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: () => void }) {
+function Sub2ApiImportDialog({ open, poolType, onOpenChange, onCreated }: { open: boolean; poolType: string; onOpenChange: (open: boolean) => void; onCreated: () => void }) {
   const { adminFetch } = useAdmin();
   const [jsonText, setJsonText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ imported: number; skipped: number; accounts: { id: string; name: string; poolType: string }[]; errors: { name: string; message: string }[] } | null>(null);
+  const [job, setJob] = useState<ImportJob | null>(null);
+  const liveJob = useImportJobStream(job, onCreated);
   const [dragOver, setDragOver] = useState(false);
   const [fileCount, setFileCount] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [detectedAccounts, setDetectedAccounts] = useState(0);
 
   function reset() {
-    setJsonText(""); setError(null); setResult(null); setFileCount(0); setDetectedAccounts(0);
+    setJsonText(""); setError(null); setJob(null); setFileCount(0); setDetectedAccounts(0);
   }
 
   // Merge a parsed Sub2API payload (or array) into whatever is currently in
@@ -523,27 +538,21 @@ function Sub2ApiImportDialog({ open, onOpenChange, onCreated }: { open: boolean;
 
   async function handleSubmit() {
     if (!jsonText.trim()) { setError("请粘贴 Sub2API JSON 内容"); return; }
-    let parsed: unknown;
     try {
-      parsed = JSON.parse(jsonText);
+      JSON.parse(jsonText);
     } catch {
       setError("JSON 格式无效，请检查输入内容"); return;
     }
-    setSubmitting(true); setError(null); setResult(null);
+    setSubmitting(true); setError(null); setJob(null);
     try {
-      const response = await adminFetch("/api/admin/accounts/import", {
+      const response = await adminFetch("/api/admin/import-jobs", {
         method: "POST",
-        body: JSON.stringify(parsed),
+        body: JSON.stringify({ poolType, format: "sub2api-json", input: jsonText }),
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) throw new Error(payload?.error?.message || payload?.message || "导入账号失败");
-      setResult({
-        imported: payload?.imported ?? 0,
-        skipped: payload?.skipped ?? 0,
-        accounts: payload?.accounts ?? [],
-        errors: payload?.errors ?? [],
-      });
-      if (!(payload?.errors?.length)) { setJsonText(""); }
+      setJob(payload.job as ImportJob);
+      setJsonText("");
       onCreated();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "导入账号失败");
@@ -616,33 +625,12 @@ function Sub2ApiImportDialog({ open, onOpenChange, onCreated }: { open: boolean;
             也可以直接粘贴 Sub2API 导出的完整 JSON。系统会自动识别 platform=openai（CPA/OAuth）和 platform=grok（xAI）的账号并批量导入，其余账号将被跳过。支持一次导入多个账号。
           </p>
           {error ? <div className="rounded-md border border-destructive/20 bg-destructive/5 px-3.5 py-2.5 text-xs text-destructive" role="alert">{error}</div> : null}
-          {result ? (
-            <div className="space-y-2 rounded-md border bg-[#fafafa] px-4 py-3 text-xs">
-              <p className="font-medium text-emerald-600">成功导入 {result.imported} 个账号，跳过 {result.skipped} 个。</p>
-              {result.errors.length ? (
-                <ul className="space-y-1 text-destructive">
-                  {result.errors.map((err, i) => (
-                    <li key={i} className="break-all"><span className="font-medium">{err.name}</span>：{err.message}</li>
-                  ))}
-                </ul>
-              ) : null}
-              {result.accounts.length ? (
-                <details className="pt-1">
-                  <summary className="cursor-pointer text-muted-foreground">已导入账号（{result.accounts.length}）</summary>
-                  <ul className="mt-1 space-y-0.5 text-muted-foreground">
-                    {result.accounts.map((a) => (
-                      <li key={a.id}>{a.name} · {a.poolType}</li>
-                    ))}
-                  </ul>
-                </details>
-              ) : null}
-            </div>
-          ) : null}
+          {liveJob ? <ImportJobProgress job={liveJob} /> : null}
         </div>
         <DialogFooter className="mb-0 border-t bg-[#fafafa] px-5 py-4">
           <Button variant="outline" onClick={() => { reset(); onOpenChange(false); }}>取消</Button>
-          <Button onClick={() => void handleSubmit()} disabled={submitting}>
-            {submitting ? "正在导入" : "开始导入"}
+          <Button onClick={() => void handleSubmit()} disabled={submitting || liveJob?.status === "RUNNING" || liveJob?.status === "QUEUED"}>
+            {submitting ? "正在创建任务" : liveJob ? "重新导入" : "开始后台导入"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -650,39 +638,39 @@ function Sub2ApiImportDialog({ open, onOpenChange, onCreated }: { open: boolean;
   );
 }
 
-function XaiSsoImportDialog({ open, onOpenChange, onCreated }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: () => void }) {
+function XaiSsoImportDialog({ format, open, onOpenChange, onCreated }: { format: XaiImportFormat | null; open: boolean; onOpenChange: (open: boolean) => void; onCreated: () => void }) {
   const { adminFetch } = useAdmin();
   const [tokenText, setTokenText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ created: { index: number; name: string; email: string; accountId: string }[]; failed: { index: number; error: string }[] } | null>(null);
+  const [job, setJob] = useState<ImportJob | null>(null);
+  const liveJob = useImportJobStream(job, onCreated);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const meta = format === "cpa-json"
+    ? { title: "导入 xAI CPA JSON", description: "兼容 CLIProxyAPI xAI auth JSON 与 grok2api Grok Build JSON/JSONL 导出。", placeholder: "粘贴 JSON，或选择一个或多个 JSON 文件" }
+    : format === "refresh-token"
+      ? { title: "导入 xAI Refresh Token", description: "每行一个 refresh token。后台会刷新凭据、识别账号并探测真实额度。", placeholder: "每行一个 refresh token" }
+      : { title: "导入 xAI SSO", description: "每行一个 Grok Web SSO Key，后台通过 Device Flow 转换为 OAuth 凭据。", placeholder: "每行一个 SSO Token（eyJ...）" };
 
   function reset() {
-    setTokenText(""); setError(null); setResult(null);
+    setTokenText(""); setError(null); setJob(null);
   }
 
   async function handleSubmit() {
-    const tokens = tokenText
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0);
-    if (!tokens.length) { setError("请至少粘贴一个 SSO Token"); return; }
-    setSubmitting(true); setError(null); setResult(null);
+    if (!format || !tokenText.trim()) { setError("请填写要导入的凭据"); return; }
+    setSubmitting(true); setError(null); setJob(null);
     try {
-      const response = await adminFetch("/api/admin/accounts/sso-import", {
+      const response = await adminFetch("/api/admin/import-jobs", {
         method: "POST",
-        body: JSON.stringify({ ssoTokens: tokens }),
+        body: JSON.stringify({ poolType: "xai-grok", format, input: tokenText }),
       });
       const payload = await response.json().catch(() => null);
-      if (!response.ok) throw new Error(payload?.error?.message || payload?.message || "SSO 导入失败");
-      setResult({
-        created: payload?.created ?? [],
-        failed: payload?.failed ?? [],
-      });
-      if (!payload?.failed?.length) { setTokenText(""); }
+      if (!response.ok) throw new Error(payload?.error?.message || payload?.message || "导入任务创建失败");
+      setJob(payload.job as ImportJob);
+      setTokenText("");
       onCreated();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "SSO 导入失败");
+      setError(cause instanceof Error ? cause.message : "导入任务创建失败");
     } finally {
       setSubmitting(false);
     }
@@ -692,50 +680,35 @@ function XaiSsoImportDialog({ open, onOpenChange, onCreated }: { open: boolean; 
     <Dialog open={open} onOpenChange={(next) => { if (!next) reset(); onOpenChange(next); }}>
       <DialogContent className="max-h-[85dvh] gap-0 overflow-hidden p-0 sm:max-w-lg">
         <DialogHeader className="border-b px-5 py-4">
-          <DialogTitle>导入 xAI SSO</DialogTitle>
-          <DialogDescription>粘贴 Grok Web 的 SSO Key，系统自动走 xAI Device Flow 转换为 OAuth 凭据并批量导入。</DialogDescription>
+          <DialogTitle>{meta.title}</DialogTitle>
+          <DialogDescription>{meta.description}</DialogDescription>
         </DialogHeader>
         <div className="max-h-[calc(85dvh-160px)] space-y-4 overflow-y-auto px-5 py-6">
           <Textarea
             value={tokenText}
             onChange={(e) => setTokenText(e.target.value)}
-            placeholder={"每行一个 SSO Token（eyJ... 格式）"}
+            placeholder={meta.placeholder}
             className="min-h-[200px] resize-y rounded-md font-mono text-xs leading-5"
             spellCheck={false}
           />
-          <p className="text-[11px] leading-4 text-muted-foreground">
-            粘贴 Grok Web SSO Key，系统会自动走 xAI Device Flow 并转换为 OAuth 凭据。每行一个，支持批量导入，3 路并发。
-          </p>
-          {error ? <div className="rounded-md border border-destructive/20 bg-destructive/5 px-3.5 py-2.5 text-xs text-destructive" role="alert">{error}</div> : null}
-          {result ? (
-            <div className="space-y-2 rounded-md border bg-[#fafafa] px-4 py-3 text-xs">
-              <p className="font-medium text-emerald-600">
-                成功导入 {result.created.length} 个账号{result.failed.length ? `，失败 ${result.failed.length} 个` : ""}。
-              </p>
-              {result.failed.length ? (
-                <ul className="space-y-1 text-destructive">
-                  {result.failed.map((f, i) => (
-                    <li key={i} className="break-all">#{f.index}：{f.error}</li>
-                  ))}
-                </ul>
-              ) : null}
-              {result.created.length ? (
-                <details className="pt-1">
-                  <summary className="cursor-pointer text-muted-foreground">已导入账号（{result.created.length}）</summary>
-                  <ul className="mt-1 space-y-0.5 text-muted-foreground">
-                    {result.created.map((c) => (
-                      <li key={c.index}>#{c.index} · {c.name}{c.email ? ` · ${c.email}` : ""}</li>
-                    ))}
-                  </ul>
-                </details>
-              ) : null}
+          {format === "cpa-json" ? (
+            <div>
+              <input ref={fileRef} type="file" accept=".json,.jsonl,application/json" multiple className="hidden" onChange={(event) => {
+                const files = Array.from(event.target.files ?? []);
+                if (files.length) void Promise.all(files.map((file) => file.text())).then((texts) => setTokenText(texts.length === 1 ? texts[0] : `[${texts.join(",")}]`));
+                event.currentTarget.value = "";
+              }} />
+              <Button type="button" variant="outline" size="sm" onClick={() => fileRef.current?.click()}><FileUp />选择 JSON / JSONL 文件</Button>
             </div>
           ) : null}
+          <p className="text-[11px] leading-4 text-muted-foreground">任务最多 3 路并发，关闭页面后仍会继续；服务重启会恢复未完成任务。</p>
+          {error ? <div className="rounded-md border border-destructive/20 bg-destructive/5 px-3.5 py-2.5 text-xs text-destructive" role="alert">{error}</div> : null}
+          {liveJob ? <ImportJobProgress job={liveJob} /> : null}
         </div>
         <DialogFooter className="mb-0 border-t bg-[#fafafa] px-5 py-4">
           <Button variant="outline" onClick={() => { reset(); onOpenChange(false); }}>取消</Button>
-          <Button onClick={() => void handleSubmit()} disabled={submitting}>
-            {submitting ? "正在导入" : "开始导入"}
+          <Button onClick={() => void handleSubmit()} disabled={submitting || liveJob?.status === "RUNNING" || liveJob?.status === "QUEUED"}>
+            {submitting ? "正在创建任务" : liveJob ? "重新导入" : "开始后台导入"}
           </Button>
         </DialogFooter>
       </DialogContent>

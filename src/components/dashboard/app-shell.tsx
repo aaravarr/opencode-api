@@ -100,7 +100,7 @@ function Sidebar({ pathname, mobile = false }: { pathname: string; mobile?: bool
       <div className="flex h-14 items-center gap-2.5 border-b px-4">
         <span className="grid size-7 place-items-center rounded-md bg-[#171717] text-[11px] font-semibold text-white">O</span>
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold tracking-[-0.025em]">OpenCode Go</p>
+          <p className="truncate text-sm font-semibold tracking-[-0.025em]">Provider Gateway</p>
           <p className="font-mono text-[10px] text-muted-foreground">ACCOUNT ROUTER</p>
         </div>
       </div>

@@ -18,6 +18,10 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
   const { id } = await context.params
   const value = parsed.data
   const repository = new AccountRepository(user.id)
+  const existing = repository.get(id)
+  if (value.adminState === "ENABLED" && existing?.disabledReason === "XAI_ACCOUNT_BANNED") {
+    return Response.json({ error: { type: "account_banned", message: "该账号已被 xAI 上游封禁，不能重新启用" } }, { status: 409 })
+  }
   const account = repository.updateState(id, value)
   if (!account) return Response.json({ error: { type: "not_found" } }, { status: 404 })
   return Response.json({ account })

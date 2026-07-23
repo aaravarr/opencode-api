@@ -16,6 +16,7 @@ import { getDatabase } from "./db"
 let cachedMirrorMap: Record<string, string> | null = null
 let cacheExpiry = 0
 const CACHE_TTL_MS = 10_000
+const mirrorCacheGlobal = globalThis as typeof globalThis & { __invalidateDomainMirrorCache?: () => void }
 
 function getMirrorMap(): Record<string, string> {
   const now = Date.now()
@@ -35,6 +36,7 @@ export function invalidateMirrorCache(): void {
   cachedMirrorMap = null
   cacheExpiry = 0
 }
+mirrorCacheGlobal.__invalidateDomainMirrorCache = invalidateMirrorCache
 
 // Resolve a URL through the domain mirror map. If the URL's hostname
 // matches a configured mirror entry, returns the rewritten URL; otherwise

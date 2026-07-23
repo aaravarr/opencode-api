@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowDown, ArrowUp, CheckCircle2, ChevronDown, GripVertical, Pencil, Plus, RefreshCw, ShieldCheck, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, CheckCircle2, GripVertical, Pencil, Plus, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -9,7 +9,6 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useAdmin } from "./admin-context";
 import { EmptyState, ErrorState, LoadingTable, PageIntro, Panel, formatDate } from "./page-kit";
 import { AccountBadges, BillingSafetyBadge, getPoolLabel, PoolTypeBadge } from "./status-ui";
@@ -100,7 +99,7 @@ export function RoutingPage() {
             </div>
           </Panel>
           <Panel title="候选账号" description="显示缓存状态，不额外触发上游额度请求。">
-            {loading ? <LoadingTable rows={5} columns={3} /> : accounts.length ? <div className="divide-y">{accounts.map((account, index) => <div key={account.id} className="grid gap-3 px-4 py-3 sm:grid-cols-[32px_minmax(0,1fr)_auto] sm:items-center sm:px-5"><span className="font-mono text-xs text-muted-foreground">{String(index + 1).padStart(2, "0")}</span><div className="min-w-0"><p className="truncate text-sm font-medium">{account.name || account.email || account.id}</p><p className="mt-1 truncate font-mono text-[10px] text-muted-foreground">{account.workspaceId || account.id}</p></div><div className="flex flex-wrap gap-1.5"><PoolTypeBadge poolType={account.poolType} /><AccountBadges account={account} /><BillingSafetyBadge account={account} /></div></div>)}</div> : <EmptyState title="没有候选账号" description="通过浏览器插件连接至少一个可用的 OpenCode Go 账号，或添加 CPA 账号。" />}
+            {loading ? <LoadingTable rows={5} columns={3} /> : accounts.length ? <div className="divide-y">{accounts.map((account, index) => <div key={account.id} className="grid gap-3 px-4 py-3 sm:grid-cols-[32px_minmax(0,1fr)_auto] sm:items-center sm:px-5"><span className="font-mono text-xs text-muted-foreground">{String(index + 1).padStart(2, "0")}</span><div className="min-w-0"><p className="truncate text-sm font-medium">{account.name || account.email || account.id}</p><p className="mt-1 truncate font-mono text-[10px] text-muted-foreground">{account.workspaceId || account.id}</p></div><div className="flex flex-wrap gap-1.5"><PoolTypeBadge poolType={account.poolType} /><AccountBadges account={account} /><BillingSafetyBadge account={account} /></div></div>)}</div> : <EmptyState title="没有候选账号" description="先在账号池中添加并验证至少一个 Provider 账号。" />}
           </Panel>
         </div> : null}
 

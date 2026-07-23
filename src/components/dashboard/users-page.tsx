@@ -188,7 +188,7 @@ export function UsersPage() {
                 <TableHead className="px-4">用户</TableHead>
                 <TableHead>角色</TableHead>
                 <TableHead>状态</TableHead>
-                <TableHead>Go 账号</TableHead>
+                <TableHead>Provider 账号</TableHead>
                 <TableHead>API 密钥</TableHead>
                 <TableHead>创建时间</TableHead>
                 <TableHead className="w-14" />

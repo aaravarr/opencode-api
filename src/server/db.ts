@@ -78,6 +78,10 @@ CREATE TABLE IF NOT EXISTS accounts (
   last_request_at TEXT,
   last_success_at TEXT,
   last_limit_at TEXT,
+  disabled_reason TEXT,
+  disabled_at TEXT,
+  last_error TEXT,
+  external_id TEXT,
   max_concurrency INTEGER NOT NULL DEFAULT 4,
   ordinal INTEGER NOT NULL,
   created_at TEXT NOT NULL,
@@ -93,6 +97,8 @@ CREATE TABLE IF NOT EXISTS quota_windows (
   usage_percent REAL NOT NULL,
   reset_at TEXT,
   source TEXT NOT NULL DEFAULT 'DASHBOARD',
+  limit_value INTEGER,
+  remaining_value INTEGER,
   observation_version INTEGER NOT NULL DEFAULT 1,
   last_observed_at TEXT NOT NULL,
   PRIMARY KEY(owner_user_id, account_id, kind)
@@ -215,6 +221,41 @@ CREATE TABLE IF NOT EXISTS provider_credentials (
 );
 CREATE INDEX IF NOT EXISTS provider_credentials_owner_idx ON provider_credentials(owner_user_id);
 
+CREATE TABLE IF NOT EXISTS import_jobs (
+  id TEXT PRIMARY KEY,
+  owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  pool_type TEXT NOT NULL,
+  format TEXT NOT NULL,
+  status TEXT NOT NULL,
+  total_items INTEGER NOT NULL DEFAULT 0,
+  processed_items INTEGER NOT NULL DEFAULT 0,
+  succeeded_items INTEGER NOT NULL DEFAULT 0,
+  failed_items INTEGER NOT NULL DEFAULT 0,
+  current_step TEXT,
+  error TEXT,
+  payload_ciphertext TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS import_jobs_owner_created_idx ON import_jobs(owner_user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS import_job_items (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL REFERENCES import_jobs(id) ON DELETE CASCADE,
+  item_index INTEGER NOT NULL,
+  label TEXT NOT NULL,
+  status TEXT NOT NULL,
+  step TEXT,
+  account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(job_id, item_index)
+);
+CREATE INDEX IF NOT EXISTS import_job_items_job_idx ON import_job_items(job_id, item_index);
+
 CREATE TABLE IF NOT EXISTS model_routing (
   id TEXT PRIMARY KEY,
   owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -238,6 +279,8 @@ export function createDatabase(filename: string): AppDatabase {
   ensureCurrentGatewayRequestColumns(db)
   ensureCurrentApiKeyColumns(db)
   ensureUserColumns(db)
+  ensureCurrentQuotaColumns(db)
+  db.exec("CREATE INDEX IF NOT EXISTS accounts_provider_external_idx ON accounts(owner_user_id, pool_type, external_id)")
   return db
 }
 
@@ -253,10 +296,20 @@ function ensureCurrentAccountColumns(db: AppDatabase): void {
     ["is_zen_subscribed", "INTEGER NOT NULL DEFAULT 0"],
     ["zen_subscription_id", "TEXT"],
     ["has_manage_subscription_button", "INTEGER NOT NULL DEFAULT 0"],
+    ["disabled_reason", "TEXT"],
+    ["disabled_at", "TEXT"],
+    ["last_error", "TEXT"],
+    ["external_id", "TEXT"],
   ] as const
   for (const [name, definition] of additions) {
     if (!existing.has(name)) db.exec(`ALTER TABLE accounts ADD COLUMN ${name} ${definition}`)
   }
+}
+
+function ensureCurrentQuotaColumns(db: AppDatabase): void {
+  const cols = new Set((db.prepare("PRAGMA table_info(quota_windows)").all() as { name: string }[]).map((column) => column.name))
+  if (!cols.has("limit_value")) db.exec("ALTER TABLE quota_windows ADD COLUMN limit_value INTEGER")
+  if (!cols.has("remaining_value")) db.exec("ALTER TABLE quota_windows ADD COLUMN remaining_value INTEGER")
 }
 
 function ensureCurrentApiKeyColumns(db: AppDatabase): void {
@@ -324,7 +377,7 @@ function resetLegacyAccountDomain(db: AppDatabase): void {
   }
 }
 
-const CURRENT_ACCOUNT_SCHEMA_VERSION = 5
+const CURRENT_ACCOUNT_SCHEMA_VERSION = 6
 const globalDatabase = globalThis as typeof globalThis & {
   __opencodeApiDb?: AppDatabase
   __opencodeApiAccountSchemaVersion?: number
@@ -341,9 +394,12 @@ export function getDatabase(): AppDatabase {
   // migrations once per schema version so a code reload cannot leave that live
   // connection on the previous table shape.
   if (globalDatabase.__opencodeApiAccountSchemaVersion !== CURRENT_ACCOUNT_SCHEMA_VERSION) {
+    globalDatabase.__opencodeApiDb.exec(schema)
     ensureCurrentAccountColumns(globalDatabase.__opencodeApiDb)
     ensurePoolTypeColumn(globalDatabase.__opencodeApiDb)
     ensureCurrentGatewayRequestColumns(globalDatabase.__opencodeApiDb)
+    ensureCurrentQuotaColumns(globalDatabase.__opencodeApiDb)
+    globalDatabase.__opencodeApiDb.exec("CREATE INDEX IF NOT EXISTS accounts_provider_external_idx ON accounts(owner_user_id, pool_type, external_id)")
     globalDatabase.__opencodeApiAccountSchemaVersion = CURRENT_ACCOUNT_SCHEMA_VERSION
   }
   return globalDatabase.__opencodeApiDb

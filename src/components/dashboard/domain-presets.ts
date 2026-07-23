@@ -34,6 +34,7 @@ export const PROVIDER_DOMAIN_PRESETS: DomainPresetGroup[] = [
     poolType: "xai-grok",
     label: "xAI Grok",
     domains: [
+      { domain: "accounts.x.ai", label: "accounts.x.ai", description: "xAI 账号登录与 SSO 会话验证。" },
       { domain: "api.x.ai", label: "api.x.ai", description: "xAI inference upstream (/responses, /chat/completions, /images/*)." },
       { domain: "cli-chat-proxy.grok.com", label: "cli-chat-proxy.grok.com", description: "xAI CLI billing probe (subscription tier detection)." },
       { domain: "auth.x.ai", label: "auth.x.ai", description: "xAI OAuth token refresh endpoint (token grant)." },

@@ -21,4 +21,15 @@ describe("usage maintenance candidates", () => {
     db.prepare("INSERT INTO routing_state(owner_user_id,preferred_account_id,current_account_id,updated_at) VALUES(?,?,?,?)").run("owner", idle, idle, now.toISOString())
     expect(listDueUsageCandidates(db, now)).toEqual([{ ownerUserId: "owner", accountId: recent, poolType: "opencode-go" }])
   })
+
+  it("重新导入不会恢复已被 xAI 永久封禁的账号", () => {
+    const db = createDatabase(":memory:"); const now = new Date().toISOString()
+    db.prepare("INSERT INTO users(id,username,username_normalized,display_name,role,status,password_hash,created_at,updated_at) VALUES(?,?,?,?,?,'ACTIVE',?,?,?)")
+      .run("owner", "owner", "owner", "Owner", "USER", "hash", now, now)
+    const repository = new AccountRepository("owner", db, new SecretVault(encryptionKey))
+    const account = repository.createProviderAccount({ name: "grok", poolType: "xai-grok", externalId: "same" })
+    repository.updateState(account.id, { adminState: "DISABLED", authState: "AUTH_ERROR", disabledReason: "XAI_ACCOUNT_BANNED", disabledAt: now })
+    const reimported = repository.createProviderAccount({ name: "grok updated", poolType: "xai-grok", externalId: "same" })
+    expect(reimported).toMatchObject({ id: account.id, name: "grok updated", adminState: "DISABLED", authState: "AUTH_ERROR", disabledReason: "XAI_ACCOUNT_BANNED" })
+  })
 })

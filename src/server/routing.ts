@@ -4,7 +4,7 @@ import { getDatabase } from "./db"
 import { AccountRepository } from "./repository"
 import { getSystemSettings, normalizeOfficialOpenCodeUpstreamUrl } from "./settings"
 import type { AccountRecord, PoolType, QuotaKind, RouteSelection } from "./types"
-import { tryGetProvider, getProvider } from "./providers"
+import { tryGetProvider } from "./providers"
 import { ModelRoutingRepository } from "./repository"
 
 type Row = Record<string, unknown>
@@ -233,6 +233,17 @@ export class RoutingService {
           .run(timestamp, this.ownerUserId)
       }
       this.event("GO_QUOTA_BLOCKED", "WARN", accountId, null, { kind, resetAt, retryAfterSeconds: retry })
+    })()
+  }
+
+  markPermanentlyDisabled(accountId: string, reason: string, message: string): void {
+    const timestamp = nowIso()
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE accounts SET admin_state='DISABLED',auth_state='AUTH_ERROR',disabled_reason=?,disabled_at=?,last_error=?,updated_at=? WHERE id=? AND owner_user_id=?`)
+        .run(reason, timestamp, message.slice(0, 500), timestamp, accountId, this.ownerUserId)
+      this.db.prepare("UPDATE routing_state SET current_account_id=CASE WHEN current_account_id=? THEN NULL ELSE current_account_id END,preferred_account_id=CASE WHEN preferred_account_id=? THEN NULL ELSE preferred_account_id END,cursor_version=cursor_version+1,updated_at=? WHERE owner_user_id=?")
+        .run(accountId, accountId, timestamp, this.ownerUserId)
+      this.event("ACCOUNT_PERMANENTLY_DISABLED", "ERROR", accountId, null, { reason, message: message.slice(0, 500) })
     })()
   }
 
