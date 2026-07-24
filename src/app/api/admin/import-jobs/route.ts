@@ -14,7 +14,10 @@ const createSchema = z.object({
 export async function GET(request: Request) {
   const user = requireSession(request)
   if (user instanceof Response) return user
-  return Response.json({ jobs: listImportJobs(user.id) })
+  const url = new URL(request.url)
+  const poolType = url.searchParams.get("poolType")
+  const limit = Number(url.searchParams.get("limit") ?? "20")
+  return Response.json({ jobs: listImportJobs(user.id, undefined, Number.isFinite(limit) ? limit : 20, poolType) })
 }
 
 export async function POST(request: Request) {

@@ -199,8 +199,11 @@ export function getImportJob(ownerUserId: string, jobId: string, db: AppDatabase
   return row ? publicJob(row, db) : null
 }
 
-export function listImportJobs(ownerUserId: string, db: AppDatabase = getDatabase(), limit = 10) {
-  const rows = db.prepare("SELECT * FROM import_jobs WHERE owner_user_id=? ORDER BY created_at DESC LIMIT ?").all(ownerUserId, Math.max(1, Math.min(limit, 50))) as ImportJobRow[]
+export function listImportJobs(ownerUserId: string, db: AppDatabase = getDatabase(), limit = 10, poolType?: string | null) {
+  const safeLimit = Math.max(1, Math.min(limit, 50))
+  const rows = poolType && poolType !== "all"
+    ? db.prepare("SELECT * FROM import_jobs WHERE owner_user_id=? AND pool_type=? ORDER BY created_at DESC LIMIT ?").all(ownerUserId, poolType, safeLimit) as ImportJobRow[]
+    : db.prepare("SELECT * FROM import_jobs WHERE owner_user_id=? ORDER BY created_at DESC LIMIT ?").all(ownerUserId, safeLimit) as ImportJobRow[]
   return rows.map((row) => publicJob(row, db, false))
 }
 
@@ -354,15 +357,78 @@ export async function runImportJob(jobId: string, db: AppDatabase = getDatabase(
     await Promise.all(workers)
     const counts = db.prepare("SELECT succeeded_items,failed_items FROM import_jobs WHERE id=?").get(jobId) as { succeeded_items: number; failed_items: number }
     const timestamp = nowIso()
-    db.prepare("UPDATE import_jobs SET status='COMPLETED',current_step=?,completed_at=?,updated_at=?,payload_ciphertext=? WHERE id=?")
-      .run(counts.failed_items ? "导入完成，部分账号失败" : "全部导入完成", timestamp, timestamp, new SecretVault().encrypt("[]"), jobId)
+    db.prepare("UPDATE import_jobs SET status='COMPLETED',current_step=?,completed_at=?,updated_at=? WHERE id=?")
+      .run(counts.failed_items ? "导入完成，部分账号失败" : "全部导入完成", timestamp, timestamp, jobId)
   } catch (cause) {
     const timestamp = nowIso()
-    db.prepare("UPDATE import_jobs SET status='FAILED',error=?,current_step='任务异常终止',completed_at=?,updated_at=?,payload_ciphertext=? WHERE id=?")
-      .run(cause instanceof Error ? cause.message : "导入任务失败", timestamp, timestamp, new SecretVault().encrypt("[]"), jobId)
+    db.prepare("UPDATE import_jobs SET status='FAILED',error=?,current_step='任务异常终止',completed_at=?,updated_at=? WHERE id=?")
+      .run(cause instanceof Error ? cause.message : "导入任务失败", timestamp, timestamp, jobId)
   } finally {
     activeJobs.delete(jobId)
   }
+}
+
+
+function recomputeJobProgress(db: AppDatabase, jobId: string, currentStep: string) {
+  const timestamp = nowIso()
+  const counts = db.prepare(`SELECT COUNT(*) AS total,
+    SUM(CASE WHEN status IN ('COMPLETED','FAILED') THEN 1 ELSE 0 END) AS processed,
+    SUM(CASE WHEN status='COMPLETED' THEN 1 ELSE 0 END) AS succeeded,
+    SUM(CASE WHEN status='FAILED' THEN 1 ELSE 0 END) AS failed
+    FROM import_job_items WHERE job_id=?`).get(jobId) as { total: number; processed: number; succeeded: number; failed: number }
+  const allDone = Number(counts.processed || 0) >= Number(counts.total || 0) && Number(counts.total || 0) > 0
+  if (allDone) {
+    db.prepare("UPDATE import_jobs SET processed_items=?,succeeded_items=?,failed_items=?,status='COMPLETED',current_step=?,completed_at=COALESCE(completed_at,?),updated_at=?,error=NULL WHERE id=?")
+      .run(counts.processed || 0, counts.succeeded || 0, counts.failed || 0, counts.failed ? "导入完成，部分账号失败" : "全部导入完成", timestamp, timestamp, jobId)
+  } else {
+    db.prepare("UPDATE import_jobs SET processed_items=?,succeeded_items=?,failed_items=?,status='RUNNING',current_step=?,completed_at=NULL,updated_at=?,error=NULL WHERE id=?")
+      .run(counts.processed || 0, counts.succeeded || 0, counts.failed || 0, currentStep, timestamp, jobId)
+  }
+}
+
+async function runSingleImportItem(jobId: string, itemIndex: number, seed: ImportSeed, db: AppDatabase = getDatabase()) {
+  try {
+    const job = db.prepare("SELECT owner_user_id FROM import_jobs WHERE id=?").get(jobId) as { owner_user_id: string } | undefined
+    if (!job) return
+    try {
+      updateItem(db, jobId, itemIndex, "RUNNING", "正在重试导入")
+      const accountId = await importSeed(job.owner_user_id, jobId, itemIndex, seed, db)
+      updateItem(db, jobId, itemIndex, "COMPLETED", "导入完成", accountId)
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "导入失败"
+      updateItem(db, jobId, itemIndex, "FAILED", "导入失败", null, message)
+    } finally {
+      recomputeJobProgress(db, jobId, "重试完成")
+    }
+  } catch {
+    // DB may be closed in tests after the request returns.
+  }
+}
+
+export function retryImportJobItem(ownerUserId: string, jobId: string, itemIndex: number, db: AppDatabase = getDatabase()) {
+  const job = db.prepare("SELECT * FROM import_jobs WHERE id=? AND owner_user_id=?").get(jobId, ownerUserId) as ImportJobRow | undefined
+  if (!job) throw new Error("导入任务不存在")
+  const item = db.prepare("SELECT item_index,status FROM import_job_items WHERE job_id=? AND item_index=?").get(jobId, itemIndex) as { item_index: number; status: string } | undefined
+  if (!item) throw new Error("导入项不存在")
+  if (item.status !== "FAILED") throw new Error("仅支持重试失败的导入项")
+
+  let seeds: ImportSeed[] = []
+  try {
+    seeds = JSON.parse(new SecretVault().decrypt(job.payload_ciphertext)) as ImportSeed[]
+  } catch {
+    throw new Error("原始导入凭据已不可用，无法重试")
+  }
+  const seed = seeds[itemIndex]
+  if (!seed) throw new Error("找不到该导入项的原始凭据")
+
+  const timestamp = nowIso()
+  db.prepare("UPDATE import_job_items SET status='QUEUED',step=?,error=NULL,account_id=NULL,updated_at=? WHERE job_id=? AND item_index=?")
+    .run("等待重试", timestamp, jobId, itemIndex)
+  recomputeJobProgress(db, jobId, "等待重试失败项")
+
+  // Prefer single-item retry so completed jobs and partially finished jobs both work.
+  void runSingleImportItem(jobId, itemIndex, seed, db)
+  return getImportJob(ownerUserId, jobId, db)!
 }
 
 export function startImportJobRunner(db: AppDatabase = getDatabase(), options: ImportRunnerOptions = {}): void {

@@ -300,7 +300,7 @@ export function AccountsPage() {
 
       {actionError ? <div className="mb-4 rounded-md border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive" role="alert">{actionError}</div> : null}
 
-      <ImportTaskCenter version={jobVersion} onAccountsChanged={() => void resource.refresh()} />
+      <ImportTaskCenter version={jobVersion} poolType={poolFilter} onAccountsChanged={() => void resource.refresh()} />
 
       <Panel
         title="账号"
