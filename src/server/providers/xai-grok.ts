@@ -89,10 +89,16 @@ export async function exchangeXaiRefreshToken(refreshToken: string, clientId = X
   }
 }
 
-// Grok CLI client identity required by some upstream endpoints.
-const GROK_CLIENT_VERSION = "0.2.93"
-// sub2api uses "sub2api-grok/1.0" so we match; the CLI gateway checks this UA.
-const GROK_CLI_USER_AGENT = "sub2api-grok/1.0"
+// Grok CLI client identity — must mirror grok-api / official grok-shell.
+// cli-chat-proxy gates server tools and OAuth paths on these headers.
+const GROK_CLIENT_VERSION = process.env.GROK_CLIENT_VERSION?.trim() || "0.2.101"
+const GROK_PRODUCT = "grok-shell"
+const GROK_CLIENT_IDENTIFIER = "grok-shell"
+const GROK_TOKEN_AUTH = "xai-grok-cli"
+function grokUserAgent(): string {
+  // Keep a stable desktop-like UA; do not forward Codex Desktop UA upstream.
+  return `${GROK_PRODUCT}/${GROK_CLIENT_VERSION} (windows; x86_64)`
+}
 
 const GROK_MODELS = [
   "grok-4.5",
@@ -132,12 +138,12 @@ function parseOpenAiModelList(body: string): string[] {
 const SUPPORTED_QUOTA_KINDS: readonly QuotaKind[] = ["ROLLING_24H"]
 
 // Headers forwarded from the incoming request to the upstream.
+// Intentionally exclude user-agent: Codex Desktop UA must NOT replace grok-shell identity,
+// otherwise cli-chat-proxy may ignore server tools (web_search/x_search).
 const PASSTHROUGH_HEADERS = [
-  "accept",
   "accept-language",
   "anthropic-version",
   "anthropic-beta",
-  "user-agent",
 ] as const
 
 // xAI per-response rate-limit headers we observe for quota.
@@ -271,9 +277,12 @@ export class XAIGrokProvider implements Provider {
         Authorization: `Bearer ${credential.token}`,
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
-        "user-agent": GROK_CLI_USER_AGENT,
+        "User-Agent": grokUserAgent(),
+        "x-grok-client-identifier": GROK_CLIENT_IDENTIFIER,
         "x-grok-client-version": GROK_CLIENT_VERSION,
         "x-grok-client-mode": "interactive",
+        "X-XAI-Token-Auth": GROK_TOKEN_AUTH,
+        "x-authenticateresponse": "authenticate-response",
       },
       body: JSON.stringify({ model: "grok-4.5", input: "hi", stream: false }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -396,9 +405,12 @@ export class XAIGrokProvider implements Provider {
       headers: {
         Authorization: `Bearer ${credential.token}`,
         accept: "application/json",
-        "user-agent": GROK_CLI_USER_AGENT,
+        "User-Agent": grokUserAgent(),
+        "x-grok-client-identifier": GROK_CLIENT_IDENTIFIER,
         "x-grok-client-version": GROK_CLIENT_VERSION,
         "x-grok-client-mode": "interactive",
+        "X-XAI-Token-Auth": GROK_TOKEN_AUTH,
+        "x-authenticateresponse": "authenticate-response",
       },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     })
@@ -443,9 +455,13 @@ export class XAIGrokProvider implements Provider {
 
     const headers = new Headers()
     headers.set("Authorization", `Bearer ${credential.token}`)
-    headers.set("user-agent", GROK_CLI_USER_AGENT)
+    // Match grok-api identity exactly (see grok-api/src/client/identity.ts).
+    headers.set("User-Agent", grokUserAgent())
+    headers.set("x-grok-client-identifier", GROK_CLIENT_IDENTIFIER)
     headers.set("x-grok-client-version", GROK_CLIENT_VERSION)
     headers.set("x-grok-client-mode", "interactive")
+    headers.set("X-XAI-Token-Auth", GROK_TOKEN_AUTH)
+    headers.set("x-authenticateresponse", "authenticate-response")
     headers.set("accept", "application/json, text/event-stream")
 
     if (input.method.toUpperCase() !== "GET") {
@@ -456,6 +472,14 @@ export class XAIGrokProvider implements Provider {
       const value = input.headers.get(name)
       if (value) headers.set(name, value)
     }
+
+    // Re-assert identity after any passthrough so client headers cannot clobber it.
+    headers.set("User-Agent", grokUserAgent())
+    headers.set("x-grok-client-identifier", GROK_CLIENT_IDENTIFIER)
+    headers.set("x-grok-client-version", GROK_CLIENT_VERSION)
+    headers.set("x-grok-client-mode", "interactive")
+    headers.set("X-XAI-Token-Auth", GROK_TOKEN_AUTH)
+    headers.set("x-authenticateresponse", "authenticate-response")
 
     return {
       url,
