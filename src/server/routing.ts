@@ -6,7 +6,7 @@ import { getSystemSettings, normalizeOfficialOpenCodeUpstreamUrl } from "./setti
 import type { AccountRecord, PoolType, QuotaKind, RouteSelection } from "./types"
 import { tryGetProvider } from "./providers"
 import { ModelRoutingRepository } from "./repository"
-import { isLocallyOverQuota, secondsUntilRollingWindowRelief } from "./quota-usage"
+import { resolveXaiBlockSeconds } from "./quota-usage"
 
 type Row = Record<string, unknown>
 const nowIso = () => new Date().toISOString()
@@ -292,21 +292,56 @@ export class RoutingService {
     const timestamp = nowIso()
     this.db.prepare("UPDATE accounts SET last_success_at=?, updated_at=? WHERE id=? AND owner_user_id=?")
       .run(timestamp, timestamp, accountId, this.ownerUserId)
-    this.db.prepare("DELETE FROM quota_windows WHERE account_id=? AND owner_user_id=? AND usage_percent>=100 AND reset_at IS NOT NULL AND reset_at<=?")
-      .run(accountId, this.ownerUserId, timestamp)
+    // Clear expired blocks always. For temporary provider rate-limits, a live
+    // success is strong evidence the cooldown is stale, so clear those early
+    // (sub2api-style recovery). Keep hard ROLLING_24H over-quota blocks until
+    // their reset time unless they already expired.
+    this.db.prepare(`DELETE FROM quota_windows
+      WHERE account_id=? AND owner_user_id=? AND usage_percent>=100 AND (
+        (reset_at IS NOT NULL AND reset_at<=?)
+        OR kind='PROVIDER_RATE_LIMIT'
+      )`).run(accountId, this.ownerUserId, timestamp)
   }
 
   markQuota(accountId: string, kind: QuotaKind, retryAfterSeconds: number | null, now = new Date()): void {
     const timestamp = now.toISOString()
     const account = this.accounts.get(accountId)
-    // Free-tier xAI: only treat the account as "day unavailable" when local 24h
-    // usage already crossed 1M tokens AND the upstream just errored. Temporary
-    // 429s before over-quota stay short-lived rate-limit blocks.
-    const dayUnavailable = Boolean(account && account.poolType === "xai-grok" && isLocallyOverQuota(accountId, this.db, now))
-    const kindToStore: QuotaKind = dayUnavailable ? "ROLLING_24H" : kind
-    const retry = dayUnavailable
-      ? secondsUntilRollingWindowRelief(accountId, this.db, now)
-      : (retryAfterSeconds && retryAfterSeconds > 0 && retryAfterSeconds <= 45 * 86400 ? retryAfterSeconds : 60)
+    const previous = this.db.prepare(`SELECT last_observed_at, reset_at, kind FROM quota_windows
+      WHERE owner_user_id=? AND account_id=? AND usage_percent>=100
+      ORDER BY last_observed_at DESC LIMIT 1`).get(this.ownerUserId, accountId) as {
+      last_observed_at: string | null
+      reset_at: string | null
+      kind: string | null
+    } | undefined
+
+    let kindToStore: QuotaKind = kind
+    let retry = retryAfterSeconds && retryAfterSeconds > 0 && retryAfterSeconds <= 45 * 86400 ? retryAfterSeconds : 60
+    let dayUnavailable = false
+    let blockReason: string | null = null
+
+    if (account?.poolType === "xai-grok") {
+      const decision = resolveXaiBlockSeconds({
+        accountId,
+        suggestedSeconds: retryAfterSeconds,
+        previousLimitedAt: previous?.last_observed_at,
+        previousResetAt: previous?.reset_at,
+        now,
+        db: this.db,
+      })
+      dayUnavailable = decision.dayUnavailable
+      kindToStore = dayUnavailable ? "ROLLING_24H" : (kind === "ROLLING_24H" ? "PROVIDER_RATE_LIMIT" : kind)
+      retry = decision.seconds
+      blockReason = decision.reason
+      // Never shorten an already longer active block for the same account.
+      if (previous?.reset_at) {
+        const previousResetMs = Date.parse(previous.reset_at)
+        const candidateMs = now.getTime() + retry * 1000
+        if (Number.isFinite(previousResetMs) && previousResetMs > candidateMs) {
+          retry = Math.max(60, Math.ceil((previousResetMs - now.getTime()) / 1000))
+        }
+      }
+    }
+
     const resetAt = new Date(now.getTime() + retry * 1000 + 1000).toISOString()
     this.db.transaction(() => {
       this.db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at)
@@ -330,6 +365,7 @@ export class RoutingService {
         retryAfterSeconds: retry,
         dayUnavailable,
         localUsageOverQuota: dayUnavailable,
+        blockReason,
       })
     })()
   }

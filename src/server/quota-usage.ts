@@ -1,8 +1,15 @@
 import type { AppDatabase } from "./db"
 import { getDatabase } from "./db"
 
-const XAI_DEFAULT_TOKEN_LIMIT = 1_000_000
-const ROLLING_WINDOW_MS = 24 * 60 * 60_000
+export const XAI_DEFAULT_TOKEN_LIMIT = 1_000_000
+export const ROLLING_WINDOW_MS = 24 * 60 * 60_000
+
+// Temporary rate-limit backoff ladder (inspired by sub2api).
+export const XAI_RATE_LIMIT_FALLBACK_SECONDS = 2 * 60
+export const XAI_RATE_LIMIT_REPEAT_SECONDS = 10 * 60
+export const XAI_RATE_LIMIT_SUSTAINED_SECONDS = 30 * 60
+export const XAI_RATE_LIMIT_MAX_SECONDS = 60 * 60
+export const XAI_RATE_LIMIT_QUIET_PERIOD_MS = 60 * 60_000
 
 function roundPercent(value: number): number {
   if (!Number.isFinite(value)) return 0
@@ -77,18 +84,119 @@ export function isLocallyOverQuota(accountId: string, db: AppDatabase = getDatab
 }
 
 /**
- * Seconds until the oldest successful request in the rolling 24h window ages out.
- * Used as "day unavailable" recovery time for free-tier accounts that already
- * burned past 1M tokens and then hit an upstream error.
+ * Seconds until local rolling usage falls back under the free-tier limit.
+ *
+ * Unlike "wait for the oldest request to age out", this walks requests from
+ * oldest to newest and stops as soon as enough tokens have aged out for the
+ * remaining sum to drop below the limit. That avoids waiting a full day when
+ * only a little overage needs to roll off.
  */
-export function secondsUntilRollingWindowRelief(accountId: string, db: AppDatabase = getDatabase(), now = new Date()): number {
-  const windowStartedAt = new Date(now.getTime() - ROLLING_WINDOW_MS).toISOString()
-  const row = db.prepare(`SELECT MIN(started_at) AS oldest
+export function secondsUntilUsageBelowLimit(accountId: string, db: AppDatabase = getDatabase(), now = new Date()): number {
+  const snapshot = computeLocalRollingUsage(accountId, db, now)
+  if (snapshot.usedTokens < snapshot.limitTokens) return 60
+
+  const rows = db.prepare(`SELECT started_at, COALESCE(total_tokens, 0) AS tokens
     FROM gateway_requests
-    WHERE account_id=? AND ok=1 AND started_at>=?`).get(accountId, windowStartedAt) as { oldest: string | null } | undefined
-  if (!row?.oldest) return 24 * 60 * 60
-  const oldestMs = Date.parse(row.oldest)
-  if (!Number.isFinite(oldestMs)) return 24 * 60 * 60
-  const reliefAt = oldestMs + ROLLING_WINDOW_MS
-  return Math.max(60, Math.ceil((reliefAt - now.getTime()) / 1000))
+    WHERE account_id=? AND ok=1 AND started_at>=?
+    ORDER BY started_at ASC`).all(accountId, snapshot.windowStartedAt) as Array<{ started_at: string; tokens: number }>
+
+  let used = snapshot.usedTokens
+  for (const row of rows) {
+    const startedMs = Date.parse(row.started_at)
+    if (!Number.isFinite(startedMs)) continue
+    used = Math.max(0, used - Math.max(0, Number(row.tokens || 0)))
+    if (used < snapshot.limitTokens) {
+      const reliefAt = startedMs + ROLLING_WINDOW_MS
+      return Math.max(60, Math.ceil((reliefAt - now.getTime()) / 1000))
+    }
+  }
+  return 24 * 60 * 60
+}
+
+/** @deprecated Prefer secondsUntilUsageBelowLimit; kept as a readable alias. */
+export function secondsUntilRollingWindowRelief(accountId: string, db: AppDatabase = getDatabase(), now = new Date()): number {
+  return secondsUntilUsageBelowLimit(accountId, db, now)
+}
+
+function clampRetrySeconds(value: number | null | undefined, fallback: number, options?: { allowShorterThanFallback?: boolean }): number {
+  if (value == null || !Number.isFinite(value) || value <= 0) return fallback
+  const rounded = Math.max(1, Math.min(45 * 86_400, Math.round(value)))
+  if (options?.allowShorterThanFallback) return rounded
+  return Math.max(fallback, rounded)
+}
+
+/**
+ * Temporary 429 backoff for accounts that are NOT already over the local 1M
+ * rolling budget. Escalates when the account was rate-limited again soon after
+ * the previous cooldown (sub2api-style adaptive ladder).
+ */
+export function computeAdaptiveRateLimitSeconds(input: {
+  suggestedSeconds?: number | null
+  previousLimitedAt?: string | null
+  previousResetAt?: string | null
+  now?: Date
+}): number {
+  const now = input.now ?? new Date()
+  // Temporary throttles may legitimately be shorter than the fallback ladder.
+  const base = clampRetrySeconds(input.suggestedSeconds, XAI_RATE_LIMIT_FALLBACK_SECONDS, { allowShorterThanFallback: true })
+
+  const previousResetMs = input.previousResetAt ? Date.parse(input.previousResetAt) : Number.NaN
+  const previousLimitedMs = input.previousLimitedAt ? Date.parse(input.previousLimitedAt) : Number.NaN
+  if (!Number.isFinite(previousResetMs) || !Number.isFinite(previousLimitedMs)) return base
+
+  // Still cooling, or cooled down only recently: escalate.
+  const quiet = now.getTime() - previousResetMs
+  if (previousResetMs > now.getTime() || quiet <= XAI_RATE_LIMIT_QUIET_PERIOD_MS) {
+    const previousDurationSec = Math.max(0, Math.round((previousResetMs - previousLimitedMs) / 1000))
+    let adaptive = XAI_RATE_LIMIT_REPEAT_SECONDS
+    if (previousDurationSec >= XAI_RATE_LIMIT_SUSTAINED_SECONDS) adaptive = XAI_RATE_LIMIT_MAX_SECONDS
+    else if (previousDurationSec >= XAI_RATE_LIMIT_REPEAT_SECONDS) adaptive = XAI_RATE_LIMIT_SUSTAINED_SECONDS
+    return Math.max(base, adaptive)
+  }
+  return base
+}
+
+/**
+ * Decide how long an xAI free account should stay blocked after an upstream error.
+ *
+ * Priority:
+ * 1. Explicit upstream retry/reset seconds when present
+ * 2. If already over local 1M: wait only until usage falls back under 1M
+ * 3. Otherwise: adaptive short/medium cooldown
+ */
+export function resolveXaiBlockSeconds(input: {
+  accountId: string
+  suggestedSeconds?: number | null
+  previousLimitedAt?: string | null
+  previousResetAt?: string | null
+  now?: Date
+  db?: AppDatabase
+}): { seconds: number; dayUnavailable: boolean; reason: "header" | "local_under_limit" | "adaptive" } {
+  const db = input.db ?? getDatabase()
+  const now = input.now ?? new Date()
+  const over = isLocallyOverQuota(input.accountId, db, now)
+  const header = input.suggestedSeconds != null && Number.isFinite(input.suggestedSeconds) && input.suggestedSeconds > 0
+    ? clampRetrySeconds(input.suggestedSeconds, XAI_RATE_LIMIT_FALLBACK_SECONDS, { allowShorterThanFallback: true })
+    : null
+
+  if (over) {
+    const local = secondsUntilUsageBelowLimit(input.accountId, db, now)
+    if (header != null) {
+      // Trust header to shorten long local waits, but never wait longer than the
+      // time needed for local usage to fall under 1M.
+      return { seconds: Math.max(60, Math.min(local, header)), dayUnavailable: true, reason: "header" }
+    }
+    return { seconds: local, dayUnavailable: true, reason: "local_under_limit" }
+  }
+
+  return {
+    seconds: computeAdaptiveRateLimitSeconds({
+      suggestedSeconds: header,
+      previousLimitedAt: input.previousLimitedAt,
+      previousResetAt: input.previousResetAt,
+      now,
+    }),
+    dayUnavailable: false,
+    reason: header != null ? "header" : "adaptive",
+  }
 }
