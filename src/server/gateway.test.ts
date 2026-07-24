@@ -63,7 +63,7 @@ describe("gateway", () => {
     const limited = () => new Response(JSON.stringify({ error: { type: "GoUsageLimitError" }, metadata: { limitName: "weekly" } }), { status: 429, headers: { "retry-after": "600" } })
     const fetcher = vi.fn().mockImplementation(async () => limited())
     const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "responses")
-    expect(response.status).toBe(429); expect((await response.json()).error.type).toBe("all_go_accounts_exhausted"); expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(response.status).toBe(429); expect((await response.json()).error.type).toBe("all_provider_accounts_limited"); expect(fetcher).toHaveBeenCalledTimes(2)
   })
 
   it("首个 SSE 额度事件即使跨 chunk 也会内部切号", async () => {
@@ -73,6 +73,34 @@ describe("gateway", () => {
     const fetcher = vi.fn().mockResolvedValueOnce(new Response(stream, { headers: { "content-type": "text/event-stream", "retry-after": "120" } })).mockResolvedValueOnce(Response.json({ id: "ok" }))
     const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "responses")
     expect(response.status).toBe(200); expect(fetcher).toHaveBeenCalledTimes(2)
+  })
+
+  it("xAI 正常 SSE 首事件不会被误判成 429", async () => {
+    const { db, apiKey, credentials, hasher } = setup("xai-grok")
+    const stream = new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}\n\n'))
+      controller.close()
+    } })
+    const fetcher = vi.fn().mockResolvedValue(new Response(stream, { headers: { "content-type": "text/event-stream" } }))
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "responses")
+    expect(response.status).toBe(200)
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(db.prepare("SELECT COUNT(*) AS value FROM quota_windows WHERE kind='PROVIDER_RATE_LIMIT'").get()).toEqual({ value: 0 })
+  })
+
+  it("xAI SSE 中的结构化限频错误才触发冷却并切号", async () => {
+    const { db, apiKey, credentials, hasher } = setup("xai-grok")
+    const limitedStream = new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"error","error":{"type":"rate_limit_error","message":"too many requests"}}\n\n'))
+      controller.close()
+    } })
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(limitedStream, { headers: { "content-type": "text/event-stream" } }))
+      .mockResolvedValueOnce(Response.json({ id: "ok" }))
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "responses")
+    expect(response.status).toBe(200)
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(db.prepare("SELECT COUNT(*) AS value FROM quota_windows WHERE kind='PROVIDER_RATE_LIMIT'").get()).toEqual({ value: 1 })
   })
 
   it("成功响应携带 provider 配额头时落库且保持成功状态", async () => {
@@ -86,6 +114,24 @@ describe("gateway", () => {
     expect(response.status).toBe(200)
     const quota = db.prepare("SELECT kind,usage_percent,source FROM quota_windows WHERE kind='ROLLING_24H'").get() as { kind: string; usage_percent: number; source: string }
     expect(quota).toEqual({ kind: "ROLLING_24H", usage_percent: 25, source: "UPSTREAM_HEADER" })
+  })
+
+  it("xAI 通用 429 只创建短时冷却，不覆盖真实滚动 token 用量", async () => {
+    const { db, apiKey, credentials, hasher } = setup("xai-grok")
+    const preferred = db.prepare("SELECT preferred_account_id AS id FROM routing_state WHERE owner_user_id=?").get(ownerUserId) as { id: string }
+    const observedAt = new Date().toISOString()
+    db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at,limit_value,remaining_value)
+      VALUES(?,?,'ROLLING_24H',25,NULL,'UPSTREAM_HEADER',?,1000000,750000)`).run(ownerUserId, preferred.id, observedAt)
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { type: "rate_limit_error" } }), { status: 429 }))
+      .mockResolvedValueOnce(Response.json({ id: "ok" }))
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "responses")
+    expect(response.status).toBe(200)
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(db.prepare("SELECT usage_percent,limit_value,remaining_value,source FROM quota_windows WHERE account_id=? AND kind='ROLLING_24H'").get(preferred.id))
+      .toEqual({ usage_percent: 25, limit_value: 1000000, remaining_value: 750000, source: "UPSTREAM_HEADER" })
+    expect(db.prepare("SELECT usage_percent,source FROM quota_windows WHERE account_id=? AND kind='PROVIDER_RATE_LIMIT'").get(preferred.id))
+      .toEqual({ usage_percent: 100, source: "UPSTREAM_429" })
   })
 
   it("xAI 明确封禁响应会永久停用账号并切换", async () => {

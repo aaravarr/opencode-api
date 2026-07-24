@@ -4,7 +4,7 @@ export const SUBSCRIPTION_STATES = ["ACTIVE", "INACTIVE", "VERIFY_ERROR"] as con
 export const BILLING_GUARDS = ["VERIFIED_GO_ONLY", "PAYG_FALLBACK_ENABLED", "UNVERIFIED"] as const
 // ROLLING_24H is the xAI Grok free-tier rolling 24h token window (limit 1,000,000 tokens).
 const _ROLLING_24H = "ROLLING_24H"
-export const QUOTA_KINDS = ["FIVE_HOUR", "WEEKLY", "MONTHLY", "UNKNOWN_GO_LIMIT", _ROLLING_24H] as const
+export const QUOTA_KINDS = ["FIVE_HOUR", "WEEKLY", "MONTHLY", "UNKNOWN_GO_LIMIT", _ROLLING_24H, "PROVIDER_RATE_LIMIT"] as const
 
 export const POOL_TYPES = ["opencode-go", "openai-cpa", "openai-oauth", "xai-grok"] as const
 export type PoolType = (typeof POOL_TYPES)[number]

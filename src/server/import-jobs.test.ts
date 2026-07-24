@@ -56,6 +56,22 @@ describe("xAI quota and account state", () => {
     const body = JSON.stringify({ code: "permission-denied", error: "Access to the chat endpoint is denied. Please ensure you're using the correct credentials." })
     expect(provider.classifyError(403, body, new Headers())).toMatchObject({ errorType: "XAI_ACCOUNT_BANNED", permanentlyDisableAccount: true, shouldSwitchAccount: true })
   })
+
+  it("区分短时请求限频与真实 token 额度耗尽", () => {
+    expect(provider.classifyError(429, "{}", new Headers())).toMatchObject({
+      quotaKind: "PROVIDER_RATE_LIMIT",
+      errorType: "XAI_TEMPORARILY_RATE_LIMITED",
+      shouldSwitchAccount: true,
+    })
+    expect(provider.classifyError(429, "{}", new Headers({
+      "x-ratelimit-remaining-tokens": "0",
+      "x-ratelimit-reset-tokens": String(Math.floor(Date.now() / 1000) + 3600),
+    }))).toMatchObject({
+      quotaKind: "ROLLING_24H",
+      errorType: "XAI_TOKEN_QUOTA_EXHAUSTED",
+      shouldSwitchAccount: true,
+    })
+  })
 })
 
 describe("durable import runner", () => {

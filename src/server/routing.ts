@@ -91,6 +91,22 @@ export class RoutingService {
       const state = this.getState()
       const poolPrefs = this.getPoolPreferences()
       const all = this.accounts.list()
+      // Repair rows written by versions that treated every xAI 429 as daily
+      // token exhaustion. A positive persisted token remainder proves the 429
+      // was only a temporary throttle; keep that cooldown separate and restore
+      // the real rolling usage snapshot.
+      this.db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at)
+        SELECT q.owner_user_id,q.account_id,'PROVIDER_RATE_LIMIT',100,q.reset_at,'UPSTREAM_429',q.last_observed_at
+        FROM quota_windows q JOIN accounts a ON a.id=q.account_id
+        WHERE q.owner_user_id=? AND a.pool_type='xai-grok' AND q.kind='ROLLING_24H' AND q.source='UPSTREAM_429'
+          AND q.limit_value>0 AND q.remaining_value>0
+        ON CONFLICT(owner_user_id,account_id,kind) DO UPDATE SET usage_percent=100,reset_at=excluded.reset_at,
+          source='UPSTREAM_429',observation_version=observation_version+1,last_observed_at=excluded.last_observed_at`)
+        .run(this.ownerUserId)
+      this.db.prepare(`UPDATE quota_windows SET
+        usage_percent=MAX(0,MIN(100,((limit_value-remaining_value)*100.0)/limit_value)),reset_at=NULL,source='UPSTREAM_HEADER'
+        WHERE owner_user_id=? AND kind='ROLLING_24H' AND source='UPSTREAM_429' AND limit_value>0 AND remaining_value>0`)
+        .run(this.ownerUserId)
       const activeBlocks = this.db.prepare(`SELECT account_id, reset_at FROM quota_windows
         WHERE owner_user_id = ? AND usage_percent >= 100 AND (reset_at IS NULL OR reset_at > ?)`)
         .all(this.ownerUserId, timestamp) as { account_id: string; reset_at: string | null }[]
@@ -103,10 +119,10 @@ export class RoutingService {
         INNER JOIN (
           SELECT account_id, MAX(last_observed_at) AS latest
           FROM quota_windows
-          WHERE owner_user_id = ?
+          WHERE owner_user_id = ? AND kind = 'ROLLING_24H'
           GROUP BY account_id
         ) observed ON observed.account_id = quota.account_id AND observed.latest = quota.last_observed_at
-        WHERE quota.owner_user_id = ?`)
+        WHERE quota.owner_user_id = ? AND quota.kind = 'ROLLING_24H'`)
         .all(this.ownerUserId, this.ownerUserId) as { account_id: string; usage_percent: number | null }[]
       const usagePct = new Map<string, number>()
       for (const row of usageRows) {

@@ -105,12 +105,32 @@ function goLimitToErrorClass(limit: GoLimit | null): UpstreamErrorClassification
 }
 
 function classifyFirstSseEvent(headers: Headers, chunk: string): GoLimit | null {
+  const data = firstSseData(chunk)
+  return !data ? null : classifyGoUsageLimit(new Response(null, { status: 429, headers }), data)
+}
+
+function firstSseData(chunk: string): string | null {
   const lf = chunk.indexOf("\n\n")
   const crlf = chunk.indexOf("\r\n\r\n")
   const boundaries = [lf, crlf].filter((value) => value >= 0)
   const event = boundaries.length ? chunk.slice(0, Math.min(...boundaries)) : chunk
   const data = event.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n")
-  return !data || data === "[DONE]" ? null : classifyGoUsageLimit(new Response(null, { status: 429, headers }), data)
+  return !data || data === "[DONE]" ? null : data
+}
+
+function embeddedSseErrorStatus(data: string): number | null {
+  try {
+    const parsed = JSON.parse(data) as Record<string, unknown>
+    const error = parsed.error && typeof parsed.error === "object" ? parsed.error as Record<string, unknown> : null
+    const numeric = [parsed.status, parsed.status_code, error?.status, error?.status_code]
+      .map(Number).find((value) => Number.isInteger(value) && value >= 400 && value <= 599)
+    if (numeric) return numeric
+    const type = [parsed.type === "error" ? parsed.type : "", parsed.code, error?.type, error?.code]
+      .filter((value) => typeof value === "string").join(" ").toLowerCase()
+    if (type.includes("rate_limit") || type.includes("too_many_requests")) return 429
+    if (type.includes("permission-denied") || type.includes("permission_denied")) return 403
+    return null
+  } catch { return null }
 }
 
 function responseHeaders(source: Headers): Headers {
@@ -227,9 +247,9 @@ export class GatewayService {
           const exhausted = cause.reason === "EXHAUSTED" || (tried.size > permanentlyDisabled.size)
           const status = exhausted ? 429 : 503
           const headers = exhausted && cause.retryAfterSeconds ? { "retry-after": String(cause.retryAfterSeconds) } : undefined
-          const type = exhausted ? "all_go_accounts_exhausted" : "no_eligible_account"
+          const type = exhausted ? "all_provider_accounts_limited" : "no_eligible_account"
           this.finalizeRequest(requestId, { status, outcome: type, attempts: attemptNumber, ok: 0, latencyMs: Date.now() - t0, localPrepMs: 0, error: type, logSettings, requestBodyJson, meta })
-          return Response.json({ error: { type, message: exhausted ? "All eligible provider accounts are currently quota-limited." : "No eligible provider account is available.", ...(cause.retryAfterSeconds ? { retry_after: cause.retryAfterSeconds } : {}) } }, { status, headers })
+          return Response.json({ error: { type, message: exhausted ? "All eligible provider accounts are temporarily rate-limited or quota-limited." : "No eligible provider account is available.", ...(cause.retryAfterSeconds ? { retry_after: cause.retryAfterSeconds } : {}) } }, { status, headers })
         }
         throw cause
       }
@@ -306,8 +326,16 @@ export class GatewayService {
         if (contentType.includes("text/event-stream") && upstream.body) {
           const reader = upstream.body.getReader()
           const first = await readFirstSseEvent(reader)
-          const sseLimit = (provider ? provider.classifyError(429, first.text, upstream.headers) : null)
+          const sseData = firstSseData(first.text)
+          const embeddedStatus = sseData ? embeddedSseErrorStatus(sseData) : null
+          const sseLimit = (provider && sseData && embeddedStatus ? provider.classifyError(embeddedStatus, sseData, upstream.headers) : null)
             ?? (first.text.includes("GoUsageLimitError") ? goLimitToErrorClass(classifyFirstSseEvent(upstream.headers, first.text)) : null)
+          if (sseLimit?.permanentlyDisableAccount) {
+            await reader.cancel(); tried.add(selection.account.id); permanentlyDisabled.add(selection.account.id)
+            routing.markPermanentlyDisabled(selection.account.id, sseLimit.errorType, extractBodyError(safeParse(sseData ?? "")) ?? sseLimit.errorType)
+            this.finishAttempt(attemptId, embeddedStatus ?? 403, "RETRY_NEXT_ACCOUNT", sseLimit.errorType, Date.now() - attemptStartedAt, "账号已被上游永久禁用", selection.account.name)
+            continue
+          }
           if (sseLimit?.shouldSwitchAccount) {
             await reader.cancel(); tried.add(selection.account.id); routing.markQuota(selection.account.id, sseLimit.quotaKind ?? "UNKNOWN_GO_LIMIT", sseLimit.retryAfterSeconds ?? null)
             this.finishAttempt(attemptId, 429, "RETRY_NEXT_ACCOUNT", sseLimit.errorType, Date.now() - attemptStartedAt, sseLimit.errorType, selection.account.name)

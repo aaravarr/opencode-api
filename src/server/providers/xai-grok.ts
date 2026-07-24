@@ -124,6 +124,8 @@ const PASSTHROUGH_HEADERS = [
 const RATELIMIT_LIMIT_TOKENS = "x-ratelimit-limit-tokens"
 const RATELIMIT_REMAINING_TOKENS = "x-ratelimit-remaining-tokens"
 const RATELIMIT_RESET_TOKENS = "x-ratelimit-reset-tokens"
+const RATELIMIT_REMAINING_REQUESTS = "x-ratelimit-remaining-requests"
+const RATELIMIT_RESET_REQUESTS = "x-ratelimit-reset-requests"
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -135,6 +137,26 @@ function parseNumberFromHeader(value: string | null): number | null {
 
 function toISOFromUnixSeconds(unixSeconds: number): string {
   return new Date(unixSeconds * 1000).toISOString()
+}
+
+function secondsUntilReset(value: string | null): number | null {
+  if (!value) return null
+  const numeric = parseNumberFromHeader(value)
+  if (numeric !== null) {
+    let seconds = numeric
+    if (seconds > 1_000_000_000_000) seconds = Math.floor(seconds / 1000)
+    return seconds > Date.now() / 1000 ? Math.max(1, Math.ceil(seconds - Date.now() / 1000)) : null
+  }
+  const parsed = Date.parse(value)
+  return Number.isNaN(parsed) ? null : Math.max(1, Math.ceil((parsed - Date.now()) / 1000))
+}
+
+function retryAfterSeconds(value: string | null): number | null {
+  if (!value) return null
+  const numeric = Number(value)
+  if (Number.isFinite(numeric)) return Math.max(1, Math.ceil(numeric))
+  const parsed = Date.parse(value)
+  return Number.isNaN(parsed) ? null : Math.max(1, Math.ceil((parsed - Date.now()) / 1000))
 }
 
 // ─── Provider ────────────────────────────────────────────────────────────
@@ -408,24 +430,22 @@ export class XAIGrokProvider implements Provider {
       }
     }
     if (status === 429) {
-      const retryAfterHeader = headers.get("retry-after")
-      const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : null
-      // If the reset-tokens header is present, use it as a more precise backoff.
-      const resetTokensRaw = headers.get(RATELIMIT_RESET_TOKENS)
-      let backoff = retryAfterSeconds
-      if (resetTokensRaw) {
-        const resetUnix = parseNumberFromHeader(resetTokensRaw)
-        if (resetUnix !== null) {
-          let secs = resetUnix
-          if (secs > 1_000_000_000_000) secs = Math.floor(secs / 1000)
-          if (secs > Date.now() / 1000) backoff = Math.floor(secs - Date.now() / 1000)
-        }
-      }
+      const retry = retryAfterSeconds(headers.get("retry-after"))
+      const remainingTokens = parseNumberFromHeader(headers.get(RATELIMIT_REMAINING_TOKENS))
+      const remainingRequests = parseNumberFromHeader(headers.get(RATELIMIT_REMAINING_REQUESTS))
+      // A generic 429 is usually a short request/concurrency throttle. Only
+      // consume the rolling token window when the upstream explicitly says
+      // token remaining reached zero; otherwise we would turn a 60-second
+      // cooldown into a fake 100% daily usage reading.
+      const tokenQuotaExhausted = remainingTokens !== null && remainingTokens <= 0
+      const backoff = tokenQuotaExhausted
+        ? secondsUntilReset(headers.get(RATELIMIT_RESET_TOKENS)) ?? retry
+        : secondsUntilReset(headers.get(RATELIMIT_RESET_REQUESTS)) ?? retry
       return {
         shouldSwitchAccount: true,
-        quotaKind: "ROLLING_24H",
-        retryAfterSeconds: backoff ?? retryAfterSeconds ?? null,
-        errorType: "RateLimitError",
+        quotaKind: tokenQuotaExhausted ? "ROLLING_24H" : "PROVIDER_RATE_LIMIT",
+        retryAfterSeconds: backoff,
+        errorType: tokenQuotaExhausted ? "XAI_TOKEN_QUOTA_EXHAUSTED" : remainingRequests === 0 ? "XAI_REQUEST_RATE_LIMITED" : "XAI_TEMPORARILY_RATE_LIMITED",
       }
     }
     if (status === 401 || status === 403) {

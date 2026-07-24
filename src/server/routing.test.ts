@@ -122,4 +122,19 @@ describe("routing", () => {
     routing.setPreferred(null)
     expect(routing.select("mixed-pool-request", "responses", new Set()).account.id).toBe(lowUsage.id)
   })
+
+  it("自动修复旧版本把临时 xAI 429 覆盖成 100% token 用量的记录", () => {
+    const { db, accounts, routing } = make()
+    const account = accounts.createProviderAccount({ name: "xAI legacy", poolType: "xai-grok", externalId: "xai-legacy-limit" })
+    const observedAt = new Date().toISOString()
+    db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at,limit_value,remaining_value)
+      VALUES(?,?,'ROLLING_24H',100,?,'UPSTREAM_429',?,1000000,750000)`)
+      .run(ownerUserId, account.id, new Date(Date.now() - 1_000).toISOString(), observedAt)
+
+    expect(routing.select("legacy-rate-limit-repair", "responses", new Set()).account.id).toBe(account.id)
+    expect(db.prepare("SELECT usage_percent,reset_at,source FROM quota_windows WHERE account_id=? AND kind='ROLLING_24H'").get(account.id))
+      .toEqual({ usage_percent: 25, reset_at: null, source: "UPSTREAM_HEADER" })
+    expect(db.prepare("SELECT usage_percent,source FROM quota_windows WHERE account_id=? AND kind='PROVIDER_RATE_LIMIT'").get(account.id))
+      .toEqual({ usage_percent: 100, source: "UPSTREAM_429" })
+  })
 })
