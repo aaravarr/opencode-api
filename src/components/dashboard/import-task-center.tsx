@@ -88,7 +88,7 @@ export function ImportJobProgress({
   onRetryItem?: (itemIndex: number) => void;
   retryingIndex?: number | null;
 }) {
-  const [expanded, setExpanded] = useState(defaultExpanded || job.status === "RUNNING" || job.status === "FAILED");
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const progress = job.totalItems ? Math.round((job.processedItems / job.totalItems) * 100) : 0;
   const items = job.items ?? [];
   const failedItems = items.filter((item) => item.status === "FAILED");
@@ -200,7 +200,7 @@ function LiveJob({
       job={job}
       detailed
       collapsible
-      defaultExpanded={job.status === "RUNNING" || job.status === "FAILED" || job.failedItems > 0}
+      defaultExpanded={job.status === "RUNNING" || job.status === "QUEUED"}
       onRetryItem={(itemIndex) => onRetryItem(job.id, itemIndex)}
       retryingIndex={retryingIndex?.jobId === job.id ? retryingIndex.itemIndex : null}
     />
