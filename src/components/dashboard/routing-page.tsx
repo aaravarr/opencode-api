@@ -17,6 +17,7 @@ import type { Account, ModelRouteRule, RoutingConfig } from "./types";
 
 interface RoutingPayload extends RoutingConfig { routing?: RoutingConfig }
 interface AccountsPayload {
+  items?: Account[];
   accounts?: Account[];
   poolPreferences?: Record<string, string | null>;
   poolTypes?: (string | { type: string; label: string })[];
@@ -41,12 +42,12 @@ const POOL_OPTIONS = ["opencode-go", "openai-cpa", "openai-oauth", "xai-grok"] a
 
 export function RoutingPage() {
   const routingResource = useAdminResource<RoutingPayload>("/api/admin/routing");
-  const accountsResource = useAdminResource<AccountsPayload>("/api/admin/accounts");
+  const accountsResource = useAdminResource<AccountsPayload>("/api/admin/accounts?pageSize=500&sort=name");
   const modelRoutingResource = useAdminResource<ModelRoutingPayload>("/api/admin/model-routing");
   const providerModelsResource = useAdminResource<ProviderModelsPayload>("/api/admin/provider-models");
   const { adminFetch } = useAdmin();
   const routing = routingResource.data?.routing ?? routingResource.data;
-  const accounts = accountsResource.data?.accounts ?? [];
+  const accounts = accountsResource.data?.items ?? accountsResource.data?.accounts ?? [];
   const rules = modelRoutingResource.data?.rules ?? [];
   const catalogs = providerModelsResource.data?.catalogs ?? [];
   // per-pool-type 首选账号：从 routing data 取当前配置与号池类型列表

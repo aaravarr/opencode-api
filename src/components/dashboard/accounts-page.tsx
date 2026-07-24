@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ChevronRight,
   CircleOff,
@@ -29,20 +29,61 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { PageIntro, Panel, ErrorState, LoadingTable, EmptyState, formatDate } from "./page-kit";
+import { PageIntro, Panel, ErrorState, LoadingTable, EmptyState, PaginationBar, StatsStrip, formatDate } from "./page-kit";
 import { AccountBadges, BillingSafetyBadge, getPoolLabel, getPoolQuotaKinds, getQuota, PoolTypeBadge, QuotaStatus, StatusBadge } from "./status-ui";
 import { useAdminResource } from "./use-admin-resource";
 import { useAdmin } from "./admin-context";
 import type { Account } from "./types";
 import { ImportJobProgress, ImportTaskCenter, type ImportJob, useImportJobStream } from "./import-task-center";
 
-interface AccountsPayload { accounts?: Account[]; poolPreferences?: Record<string, string | null>; poolTypes?: { type: string; label: string; description: string; quotaKinds: string[] }[] }
+interface AccountStats {
+  total: number;
+  ready: number;
+  blocked: number;
+  disabled: number;
+  banned: number;
+  authError: number;
+  inactive: number;
+  overQuota: number;
+  avgUsagePercent: number | null;
+  byPoolType?: Record<string, { total: number; ready: number; blocked: number; inactive: number; overQuota?: number }>;
+}
+
+interface AccountsPayload {
+  items?: Account[];
+  accounts?: Account[];
+  total?: number;
+  page?: number;
+  pageSize?: number;
+  stats?: AccountStats;
+  poolPreferences?: Record<string, string | null>;
+  poolTypes?: { type: string; label: string; description: string; quotaKinds: string[] }[];
+}
+
 const POOL_FILTERS = [
   { key: "all", label: "全部" },
   { key: "opencode-go", label: "OpenCode Go" },
   { key: "openai-cpa", label: "OpenAI CPA" },
   { key: "openai-oauth", label: "OpenAI OAuth" },
   { key: "xai-grok", label: "xAI Grok" },
+] as const;
+
+const STATUS_FILTERS = [
+  { key: "all", label: "全部状态" },
+  { key: "ready", label: "可路由" },
+  { key: "blocked", label: "额度阻塞" },
+  { key: "over_quota", label: "已超限" },
+  { key: "disabled", label: "已停用" },
+  { key: "banned", label: "已封禁" },
+  { key: "auth_error", label: "认证异常" },
+  { key: "inactive", label: "不可用" },
+] as const;
+
+const SORT_OPTIONS = [
+  { key: "recent", label: "最近活跃" },
+  { key: "usage", label: "用量从高到低" },
+  { key: "name", label: "名称" },
+  { key: "created", label: "创建时间" },
 ] as const;
 
 type XaiImportFormat = "cpa-json" | "refresh-token" | "xai-sso";
@@ -52,20 +93,47 @@ function poolOf(account: Account) {
 }
 
 export function AccountsPage() {
-  const resource = useAdminResource<AccountsPayload>("/api/admin/accounts");
   const { adminFetch } = useAdmin();
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [poolFilter, setPoolFilter] = useState<string>("all");
- const [selected, setSelected] = useState<Account | null>(null);
- const [connectorOpen, setConnectorOpen] = useState(false);
-const [importOpen, setImportOpen] = useState(false);
-const [xaiImportFormat, setXaiImportFormat] = useState<XaiImportFormat | null>(null);
-const [jobVersion, setJobVersion] = useState(0);
-const [busyId, setBusyId] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [sort, setSort] = useState<string>("recent");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const [selected, setSelected] = useState<Account | null>(null);
+  const [connectorOpen, setConnectorOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [xaiImportFormat, setXaiImportFormat] = useState<XaiImportFormat | null>(null);
+  const [jobVersion, setJobVersion] = useState(0);
+  const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const accounts = resource.data?.accounts ?? [];
-  const term = query.trim().toLowerCase();
   const [downloadInfo, setDownloadInfo] = useState<{ version: string | null; downloadUrl: string } | null>(null);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedQuery(query);
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+
+  const listPath = useMemo(() => {
+    const params = new URLSearchParams({
+      page: String(page),
+      pageSize: String(pageSize),
+      sort,
+    });
+    if (poolFilter !== "all") params.set("poolType", poolFilter);
+    if (statusFilter !== "all") params.set("status", statusFilter);
+    if (debouncedQuery.trim()) params.set("q", debouncedQuery.trim());
+    return `/api/admin/accounts?${params.toString()}`;
+  }, [page, pageSize, poolFilter, statusFilter, sort, debouncedQuery]);
+
+  const resource = useAdminResource<AccountsPayload>(listPath);
+  const accounts = resource.data?.items ?? resource.data?.accounts ?? [];
+  const total = resource.data?.total ?? accounts.length;
+  const stats = resource.data?.stats;
 
   useEffect(() => {
     let cancelled = false;
@@ -75,14 +143,8 @@ const [busyId, setBusyId] = useState<string | null>(null);
     return () => { cancelled = true };
   }, []);
 
-  const poolFiltered = poolFilter === "all" ? accounts : accounts.filter((a) => poolOf(a) === poolFilter);
-  const filtered = term
-    ? poolFiltered.filter((account) => [account.name, account.email, account.workspaceId, account.id, account.authState]
-      .some((value) => String(value || "").toLowerCase().includes(term)))
-    : poolFiltered;
-
   // Show monthly column only when opencode-go accounts are in the visible set
-  const showMonthly = filtered.some((a) => poolOf(a) === "opencode-go");
+  const showMonthly = accounts.some((a) => poolOf(a) === "opencode-go") || poolFilter === "opencode-go" || poolFilter === "all";
 
   async function patchAccount(account: Account, body: Record<string, unknown>) {
     setBusyId(account.id);
@@ -201,7 +263,7 @@ const [busyId, setBusyId] = useState<string | null>(null);
             <button
               key={tab.key}
               type="button"
-              onClick={() => setPoolFilter(tab.key)}
+              onClick={() => { setPoolFilter(tab.key); setPage(1); }}
               className={`h-7 rounded-md px-3 text-xs font-medium transition-colors ${
                 poolFilter === tab.key ? "bg-[#171717] text-white" : "text-muted-foreground hover:text-foreground"
               }`}
@@ -213,36 +275,66 @@ const [busyId, setBusyId] = useState<string | null>(null);
         </div>
       </div>
 
+      <div className="mb-4">
+        <StatsStrip
+          items={[
+            { label: "账号总数", value: stats?.total ?? total, hint: poolFilter === "all" ? "当前筛选范围" : "当前号池" },
+            { label: "可路由", value: stats?.ready ?? "—", hint: "可立即承载请求", tone: "success" },
+            { label: "额度阻塞", value: stats?.blocked ?? "—", hint: "等待恢复 / 当天不可用", tone: "warning" },
+            { label: "已超限", value: stats?.overQuota ?? "—", hint: poolFilter === "xai-grok" ? "滚动 24h ≥ 100%" : "主额度窗口 ≥ 100%", tone: "danger" },
+            { label: "不可用", value: stats?.inactive ?? "—", hint: `停用 ${stats?.disabled ?? 0} · 封禁 ${stats?.banned ?? 0} · 认证异常 ${stats?.authError ?? 0}` },
+            { label: "平均用量", value: stats?.avgUsagePercent == null ? "—" : `${stats.avgUsagePercent.toFixed(2)}%`, hint: "主额度窗口均值" },
+          ]}
+          className="sm:grid-cols-3 xl:grid-cols-6"
+        />
+      </div>
+
       {actionError ? <div className="mb-4 rounded-md border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive" role="alert">{actionError}</div> : null}
 
       <ImportTaskCenter version={jobVersion} onAccountsChanged={() => void resource.refresh()} />
 
       <Panel
         title="账号"
-        description={`${filtered.length} 个账号。额度耗尽和账号异常会自动切换，永久封禁账号会从调度中移除。`}
+        description={`${total} 个匹配账号。额度耗尽和账号异常会自动切换，永久封禁账号会从调度中移除。`}
         action={
-          <div className="relative w-full sm:w-64">
-            <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
-            <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索账号、邮箱或标识" className="h-8 rounded-md bg-white pl-8 text-xs" />
+          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+            <div className="relative min-w-48 flex-1 sm:w-64 sm:flex-none">
+              <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+              <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索账号、邮箱或标识" className="h-8 rounded-md bg-white pl-8 text-xs" />
+            </div>
+            <select
+              className="h-8 rounded-md border bg-white px-2 text-xs"
+              value={statusFilter}
+              onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}
+            >
+              {STATUS_FILTERS.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+            </select>
+            <select
+              className="h-8 rounded-md border bg-white px-2 text-xs"
+              value={sort}
+              onChange={(event) => { setSort(event.target.value); setPage(1); }}
+            >
+              {SORT_OPTIONS.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+            </select>
           </div>
         }
       >
         {resource.loading ? <LoadingTable rows={6} columns={7} /> : null}
         {resource.error ? <ErrorState message={resource.error} onRetry={() => void resource.refresh()} /> : null}
-        {!resource.loading && !resource.error && !filtered.length ? (
+        {!resource.loading && !resource.error && !total ? (
           <EmptyState
-            title={accounts.length ? "没有匹配的账号" : "还没有账号"}
-            description={accounts.length ? "调整搜索条件或切换号池筛选后重试。" : "先选择号池，再使用该 Provider 支持的方式接入账号。"}
-            action={!accounts.length ? poolFilter === "opencode-go" ? (
+            title={query || statusFilter !== "all" || poolFilter !== "all" ? "没有匹配的账号" : "还没有账号"}
+            description={query || statusFilter !== "all" || poolFilter !== "all" ? "调整搜索条件、状态或号池筛选后重试。" : "先选择号池，再使用该 Provider 支持的方式接入账号。"}
+            action={query || statusFilter !== "all" ? undefined : poolFilter === "opencode-go" ? (
               <Button size="sm" onClick={() => setConnectorOpen(true)}><Puzzle />连接 Go 账号</Button>
             ) : poolFilter === "xai-grok" ? (
               <Button size="sm" onClick={() => setXaiImportFormat("cpa-json")}><Upload />导入 xAI 账号</Button>
             ) : poolFilter === "openai-cpa" || poolFilter === "openai-oauth" ? (
               <Button size="sm" onClick={() => setImportOpen(true)}><Upload />导入 Sub2API JSON</Button>
-            ) : <span className="text-xs text-muted-foreground">请先在上方选择一个号池。</span> : undefined}
+            ) : <span className="text-xs text-muted-foreground">请先在上方选择一个号池。</span>}
           />
         ) : null}
-        {!resource.loading && !resource.error && filtered.length ? (
+        {!resource.loading && !resource.error && total ? (
           <Table className={showMonthly ? "min-w-[1200px]" : "min-w-[1080px]"}>
             <TableHeader className="bg-[#fafafa]">
               <TableRow className="hover:bg-[#fafafa]">
@@ -258,7 +350,7 @@ const [busyId, setBusyId] = useState<string | null>(null);
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filtered.map((account) => {
+              {accounts.map((account) => {
                 const isGo = poolOf(account) === "opencode-go";
                 return (
                   <TableRow key={account.id} className={account.isCurrent ? "bg-info-soft/60 hover:bg-info-soft" : undefined}>
@@ -318,6 +410,16 @@ const [busyId, setBusyId] = useState<string | null>(null);
               })}
             </TableBody>
           </Table>
+        ) : null}
+        {!resource.loading && !resource.error && total > 0 ? (
+          <PaginationBar
+            page={page}
+            pageSize={pageSize}
+            total={total}
+            loading={resource.loading}
+            onPageChange={setPage}
+            onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
+          />
         ) : null}
       </Panel>
 

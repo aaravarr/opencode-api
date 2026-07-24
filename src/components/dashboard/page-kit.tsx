@@ -125,3 +125,84 @@ export function formatDuration(seconds?: number | null) {
   if (seconds < 86400) return `${Math.ceil(seconds / 3600)} 小时`;
   return `${Math.ceil(seconds / 86400)} 天`;
 }
+
+export function StatsStrip({
+  items,
+  className = "",
+}: {
+  items: Array<{ label: string; value: React.ReactNode; hint?: string; tone?: "default" | "success" | "warning" | "danger" }>
+  className?: string
+}) {
+  const toneClass = {
+    default: "text-foreground",
+    success: "text-success",
+    warning: "text-warning",
+    danger: "text-destructive",
+  } as const
+  return (
+    <div className={`dashboard-surface grid overflow-hidden rounded-lg bg-white sm:grid-cols-2 xl:grid-cols-4 ${className}`}>
+      {items.map((item) => (
+        <div key={item.label} className="min-w-0 border-b border-r border-border/70 px-4 py-3 last:border-b-0 sm:border-b xl:border-b-0">
+          <p className="font-mono text-[10px] tracking-[0.08em] text-muted-foreground">{item.label}</p>
+          <p className={`mt-1 text-xl font-semibold tracking-[-0.03em] ${toneClass[item.tone || "default"]}`}>{item.value}</p>
+          {item.hint ? <p className="mt-1 text-[11px] text-muted-foreground">{item.hint}</p> : null}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+export function PaginationBar({
+  page,
+  pageSize,
+  total,
+  onPageChange,
+  onPageSizeChange,
+  pageSizeOptions = [20, 50, 100],
+  loading = false,
+}: {
+  page: number
+  pageSize: number
+  total: number
+  onPageChange: (page: number) => void
+  onPageSizeChange?: (pageSize: number) => void
+  pageSizeOptions?: number[]
+  loading?: boolean
+}) {
+  const totalPages = Math.max(1, Math.ceil(Math.max(total, 0) / Math.max(pageSize, 1)))
+  const currentPage = Math.min(Math.max(page, 1), totalPages)
+  const start = total === 0 ? 0 : (currentPage - 1) * pageSize + 1
+  const end = total === 0 ? 0 : Math.min(total, currentPage * pageSize)
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t bg-[#fafafa] px-4 py-2.5 text-xs text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-3">
+        <span>显示 {start}-{end} / 共 {total}</span>
+        {onPageSizeChange ? (
+          <label className="inline-flex items-center gap-1.5">
+            <span>每页</span>
+            <select
+              className="h-7 rounded-md border bg-white px-2 text-xs text-foreground"
+              value={pageSize}
+              onChange={(event) => onPageSizeChange(Number(event.target.value))}
+              disabled={loading}
+            >
+              {pageSizeOptions.map((size) => (
+                <option key={size} value={size}>{size}</option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+      </div>
+      <div className="flex items-center gap-1">
+        <Button variant="outline" size="sm" disabled={currentPage <= 1 || loading} onClick={() => onPageChange(currentPage - 1)}>
+          上一页
+        </Button>
+        <span className="px-2 font-mono text-[11px]">{currentPage} / {totalPages}</span>
+        <Button variant="outline" size="sm" disabled={currentPage >= totalPages || loading} onClick={() => onPageChange(currentPage + 1)}>
+          下一页
+        </Button>
+      </div>
+    </div>
+  )
+}
+

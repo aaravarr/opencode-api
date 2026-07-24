@@ -166,4 +166,32 @@ describe("routing", () => {
     expect(selected.account.id).toBe(go)
     expect(selected.account.poolType).toBe("opencode-go")
   })
+
+  it("本地已超 1M 且上游报错后，将 xAI 号标记为当天不可用", () => {
+    const { db, accounts, routing } = make()
+    const xai = accounts.createProviderAccount({ name: "xAI spent", poolType: "xai-grok", externalId: "xai-spent" })
+    const other = accounts.createProviderAccount({ name: "xAI fresh", poolType: "xai-grok", externalId: "xai-fresh" })
+    const now = new Date()
+    // Simulate local 24h usage already past 1M tokens.
+    db.prepare(`INSERT INTO gateway_requests(id,owner_user_id,endpoint,model,status,outcome,attempt_count,started_at,ok,account_id,total_tokens)
+      VALUES(?,?, 'chat/completions','grok-4.5',200,'SUCCESS',1,?,1,?,1200000)`)
+      .run("req-local-usage", ownerUserId, new Date(now.getTime() - 60_000).toISOString(), xai.id)
+    db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at,limit_value,remaining_value)
+      VALUES(?,?,'ROLLING_24H',120,NULL,'LOCAL_USAGE',?,1000000,-200000)`)
+      .run(ownerUserId, xai.id, now.toISOString())
+
+    routing.markQuota(xai.id, "PROVIDER_RATE_LIMIT", 60, now)
+
+    const blocked = db.prepare("SELECT kind,usage_percent,reset_at,source FROM quota_windows WHERE account_id=? AND kind='ROLLING_24H'").get(xai.id) as {
+      kind: string; usage_percent: number; reset_at: string | null; source: string
+    }
+    expect(blocked.kind).toBe("ROLLING_24H")
+    expect(blocked.usage_percent).toBeGreaterThanOrEqual(100)
+    expect(blocked.reset_at).toBeTruthy()
+    expect(blocked.source).toBe("UPSTREAM_429")
+
+    routing.setModel("grok-4.5")
+    const selected = routing.select("after-day-block", "chat/completions", new Set())
+    expect(selected.account.id).toBe(other.id)
+  })
 })

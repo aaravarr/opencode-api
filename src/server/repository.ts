@@ -53,6 +53,84 @@ export class AccountOwnershipConflictError extends Error {
   constructor() { super("This OpenCode workspace is already registered to another user"); this.name = "AccountOwnershipConflictError" }
 }
 
+
+export type AccountListStatusFilter = "all" | "ready" | "blocked" | "disabled" | "banned" | "auth_error" | "inactive" | "over_quota"
+export type AccountListSort = "recent" | "usage" | "name" | "created"
+
+export interface AccountListQuery {
+  q?: string | null
+  poolType?: string | null
+  status?: AccountListStatusFilter | null
+  sort?: AccountListSort | null
+  page?: number
+  pageSize?: number | null
+}
+
+export interface AccountPoolStats {
+  total: number
+  ready: number
+  blocked: number
+  inactive: number
+  overQuota: number
+}
+
+export interface AccountListStats {
+  total: number
+  ready: number
+  blocked: number
+  disabled: number
+  banned: number
+  authError: number
+  inactive: number
+  overQuota: number
+  avgUsagePercent: number | null
+  byPoolType: Record<string, AccountPoolStats>
+}
+
+export interface AccountListResult {
+  items: AccountRecord[]
+  total: number
+  page: number
+  pageSize: number
+  stats: AccountListStats
+}
+
+function parsePositiveInt(value: unknown, fallback: number, max?: number): number {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback
+  const rounded = Math.round(parsed)
+  return max == null ? rounded : Math.min(max, rounded)
+}
+
+function emptyPoolStats(): AccountPoolStats {
+  return { total: 0, ready: 0, blocked: 0, inactive: 0, overQuota: 0 }
+}
+
+function emptyAccountStats(): AccountListStats {
+  return {
+    total: 0,
+    ready: 0,
+    blocked: 0,
+    disabled: 0,
+    banned: 0,
+    authError: 0,
+    inactive: 0,
+    overQuota: 0,
+    avgUsagePercent: null,
+    byPoolType: {},
+  }
+}
+
+function accountPrimaryUsagePercent(windows: Array<{ kind?: string | null; usagePercent?: number | null }>): number | null {
+  if (!windows.length) return null
+  const preferred = windows.find((window) => {
+    const kind = String(window.kind || "").toUpperCase()
+    return kind === "ROLLING_24H" || kind === "ROLLING" || kind === "24H" || kind === "FIVE_HOUR" || kind === "FIVEHOUR" || kind === "5H"
+  }) ?? windows[0]
+  const value = preferred?.usagePercent
+  return value == null || !Number.isFinite(Number(value)) ? null : Number(value)
+}
+
 export class AccountRepository {
   constructor(readonly ownerUserId: string, readonly db: AppDatabase = getDatabase(), private readonly vault?: SecretVault) {
     if (!ownerUserId) throw new Error("ownerUserId is required")
@@ -60,6 +138,178 @@ export class AccountRepository {
 
   list(): AccountRecord[] {
     return (this.db.prepare("SELECT * FROM accounts WHERE owner_user_id = ? ORDER BY ordinal, created_at").all(this.ownerUserId) as Row[]).map(accountFromRow)
+  }
+
+  listPage(query: AccountListQuery = {}): AccountListResult {
+    const page = parsePositiveInt(query.page, 1, 10_000)
+    const unlimited = query.pageSize == null
+    const pageSize = unlimited ? Number.MAX_SAFE_INTEGER : parsePositiveInt(query.pageSize, 50, 500)
+    const poolType = query.poolType && query.poolType !== "all" ? String(query.poolType) : null
+    const status = (query.status && query.status !== "all" ? query.status : "all") as AccountListStatusFilter
+    const sort = (query.sort || "recent") as AccountListSort
+    const term = String(query.q || "").trim().toLowerCase()
+
+    const conditions = ["owner_user_id = ?"]
+    const params: Array<string | number> = [this.ownerUserId]
+    if (poolType) {
+      conditions.push("pool_type = ?")
+      params.push(poolType)
+    }
+    if (term) {
+      conditions.push("(LOWER(COALESCE(name,'')) LIKE ? OR LOWER(COALESCE(email,'')) LIKE ? OR LOWER(id) LIKE ? OR LOWER(COALESCE(workspace_id,'')) LIKE ? OR LOWER(COALESCE(external_id,'')) LIKE ?)")
+      const like = `%${term}%`
+      params.push(like, like, like, like, like)
+    }
+
+    const where = conditions.join(" AND ")
+    const rows = this.db.prepare(`SELECT * FROM accounts WHERE ${where}`).all(...params) as Row[]
+    let accounts = rows.map(accountFromRow)
+
+    const timestamp = nowIso()
+    const blockedRows = this.db.prepare(`SELECT DISTINCT account_id FROM quota_windows
+      WHERE owner_user_id = ? AND usage_percent >= 100 AND (reset_at IS NULL OR reset_at > ?)`)
+      .all(this.ownerUserId, timestamp) as { account_id: string }[]
+    const blockedSet = new Set(blockedRows.map((row) => row.account_id))
+
+    const usageRows = this.db.prepare(`SELECT account_id, kind, usage_percent FROM quota_windows WHERE owner_user_id = ?`)
+      .all(this.ownerUserId) as Array<{ account_id: string; kind: string; usage_percent: number | null }>
+    const usageByAccount = new Map<string, Array<{ kind: string; usagePercent: number | null }>>()
+    for (const row of usageRows) {
+      const list = usageByAccount.get(row.account_id) ?? []
+      list.push({ kind: row.kind, usagePercent: row.usage_percent })
+      usageByAccount.set(row.account_id, list)
+    }
+
+    const classify = (account: AccountRecord) => {
+      const banned = account.disabledReason === "XAI_ACCOUNT_BANNED"
+      const disabled = account.adminState === "DISABLED"
+      const authError = account.authState === "AUTH_ERROR" || account.authState === "REAUTH_REQUIRED"
+      const overQuota = (accountPrimaryUsagePercent(usageByAccount.get(account.id) ?? []) ?? 0) >= 100 || blockedSet.has(account.id)
+      const readyBase = account.adminState === "ENABLED"
+        && account.authState === "VALID"
+        && account.subscriptionState === "ACTIVE"
+        && !banned
+      const ready = readyBase && !overQuota
+      const inactive = !readyBase
+      const blocked = readyBase && overQuota
+      return { banned, disabled, authError, overQuota, ready, inactive, blocked }
+    }
+
+    if (status !== "all") {
+      accounts = accounts.filter((account) => {
+        const flags = classify(account)
+        if (status === "ready") return flags.ready
+        if (status === "blocked") return flags.blocked
+        if (status === "disabled") return flags.disabled
+        if (status === "banned") return flags.banned
+        if (status === "auth_error") return flags.authError
+        if (status === "inactive") return flags.inactive
+        if (status === "over_quota") return flags.overQuota
+        return true
+      })
+    }
+
+    const stats = emptyAccountStats()
+    const usageSamples: number[] = []
+    for (const account of accounts) {
+      const flags = classify(account)
+      const pool = stats.byPoolType[account.poolType] ?? emptyPoolStats()
+      pool.total += 1
+      if (flags.ready) pool.ready += 1
+      if (flags.blocked) pool.blocked += 1
+      if (flags.inactive) pool.inactive += 1
+      if (flags.overQuota) pool.overQuota += 1
+      stats.byPoolType[account.poolType] = pool
+
+      stats.total += 1
+      if (flags.ready) stats.ready += 1
+      if (flags.blocked) stats.blocked += 1
+      if (flags.disabled) stats.disabled += 1
+      if (flags.banned) stats.banned += 1
+      if (flags.authError) stats.authError += 1
+      if (flags.inactive) stats.inactive += 1
+      if (flags.overQuota) stats.overQuota += 1
+
+      const usage = accountPrimaryUsagePercent(usageByAccount.get(account.id) ?? [])
+      if (usage != null) usageSamples.push(usage)
+    }
+    stats.avgUsagePercent = usageSamples.length
+      ? Math.round((usageSamples.reduce((sum, value) => sum + value, 0) / usageSamples.length) * 100) / 100
+      : null
+
+    accounts.sort((left, right) => {
+      if (sort === "name") {
+        return String(left.name || left.email || left.id).localeCompare(String(right.name || right.email || right.id), "zh-CN")
+      }
+      if (sort === "created") {
+        return String(right.createdAt).localeCompare(String(left.createdAt))
+      }
+      if (sort === "usage") {
+        const leftUsage = accountPrimaryUsagePercent(usageByAccount.get(left.id) ?? []) ?? -1
+        const rightUsage = accountPrimaryUsagePercent(usageByAccount.get(right.id) ?? []) ?? -1
+        if (rightUsage !== leftUsage) return rightUsage - leftUsage
+      }
+      const leftRecent = left.lastRequestAt || left.lastSelectedAt || left.lastSyncedAt || left.updatedAt || left.createdAt
+      const rightRecent = right.lastRequestAt || right.lastSelectedAt || right.lastSyncedAt || right.updatedAt || right.createdAt
+      const recentCmp = String(rightRecent).localeCompare(String(leftRecent))
+      if (recentCmp !== 0) return recentCmp
+      if (left.ordinal !== right.ordinal) return left.ordinal - right.ordinal
+      return String(left.createdAt).localeCompare(String(right.createdAt))
+    })
+
+    const total = accounts.length
+    const safePageSize = unlimited ? Math.max(total, 1) : pageSize
+    const offset = unlimited ? 0 : (page - 1) * safePageSize
+    const items = unlimited ? accounts : accounts.slice(offset, offset + safePageSize)
+
+    return {
+      items,
+      total,
+      page: unlimited ? 1 : page,
+      pageSize: unlimited ? total : safePageSize,
+      stats,
+    }
+  }
+
+  listQuotaWindows(accountIds?: string[]): Array<{
+    accountId: string
+    kind: string
+    usagePercent: number | null
+    resetAt: string | null
+    source: string | null
+    lastObservedAt: string | null
+    limitValue: number | null
+    remainingValue: number | null
+  }> {
+    if (accountIds && accountIds.length === 0) return []
+    if (accountIds && accountIds.length > 0) {
+      const placeholders = accountIds.map(() => "?").join(",")
+      const rows = this.db.prepare(`SELECT account_id,kind,usage_percent,reset_at,source,last_observed_at,limit_value,remaining_value
+        FROM quota_windows WHERE owner_user_id=? AND account_id IN (${placeholders}) ORDER BY last_observed_at DESC`)
+        .all(this.ownerUserId, ...accountIds) as Row[]
+      return rows.map((row) => ({
+        accountId: String(row.account_id),
+        kind: String(row.kind),
+        usagePercent: row.usage_percent == null ? null : Number(row.usage_percent),
+        resetAt: nullableString(row.reset_at),
+        source: nullableString(row.source),
+        lastObservedAt: nullableString(row.last_observed_at),
+        limitValue: row.limit_value == null ? null : Number(row.limit_value),
+        remainingValue: row.remaining_value == null ? null : Number(row.remaining_value),
+      }))
+    }
+    const rows = this.db.prepare(`SELECT account_id,kind,usage_percent,reset_at,source,last_observed_at,limit_value,remaining_value
+      FROM quota_windows WHERE owner_user_id=? ORDER BY last_observed_at DESC`).all(this.ownerUserId) as Row[]
+    return rows.map((row) => ({
+      accountId: String(row.account_id),
+      kind: String(row.kind),
+      usagePercent: row.usage_percent == null ? null : Number(row.usage_percent),
+      resetAt: nullableString(row.reset_at),
+      source: nullableString(row.source),
+      lastObservedAt: nullableString(row.last_observed_at),
+      limitValue: row.limit_value == null ? null : Number(row.limit_value),
+      remainingValue: row.remaining_value == null ? null : Number(row.remaining_value),
+    }))
   }
 
   get(accountId: string): AccountRecord | null {
@@ -278,7 +528,9 @@ export class ModelRoutingRepository {
 export function listDueUsageCandidates(db: AppDatabase = getDatabase(), now = new Date(), limit = 25): { ownerUserId: string; accountId: string; poolType: string }[] {
   const activeSince = new Date(now.getTime() - 10 * 60_000).toISOString()
   return (db.prepare(`SELECT DISTINCT a.owner_user_id,a.id,a.pool_type FROM accounts a JOIN users u ON u.id=a.owner_user_id
-    WHERE u.status='ACTIVE' AND a.admin_state='ENABLED' AND a.auth_state='VALID' AND a.next_usage_check_at<=?
+    WHERE u.status='ACTIVE' AND a.admin_state='ENABLED' AND a.auth_state='VALID'
+      AND a.pool_type != 'xai-grok'
+      AND a.next_usage_check_at<=?
       AND a.last_request_at>=?
     ORDER BY a.next_usage_check_at LIMIT ?`).all(now.toISOString(), activeSince, limit) as { owner_user_id: string; id: string; pool_type: string }[])
     .map((row) => ({ ownerUserId: row.owner_user_id, accountId: row.id, poolType: row.pool_type ?? "opencode-go" }))

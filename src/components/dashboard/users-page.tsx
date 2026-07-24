@@ -49,6 +49,7 @@ import {
   LoadingTable,
   PageIntro,
   Panel,
+  StatsStrip,
   formatDate,
 } from "./page-kit";
 import { StatusBadge } from "./status-ui";
@@ -66,6 +67,9 @@ interface UsersPayload {
 export function UsersPage() {
   const { isAdmin, user: current, sessionFetch } = useSession();
   const resource = useAdminResource<UsersPayload>("/api/admin/users");
+  const users = resource.data?.users ?? [];
+  const adminCount = users.filter((item) => item.role === "ADMIN").length;
+  const activeCount = users.filter((item) => item.status === "ACTIVE").length;
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -136,7 +140,6 @@ export function UsersPage() {
       );
   }
 
-  const users = resource.data?.users ?? [];
   return (
     <>
       <PageIntro
@@ -160,6 +163,16 @@ export function UsersPage() {
           </>
         }
       />
+      <div className="mb-4">
+        <StatsStrip
+          items={[
+            { label: "用户总数", value: users.length },
+            { label: "启用中", value: activeCount, tone: "success" },
+            { label: "管理员", value: adminCount },
+            { label: "停用", value: Math.max(0, users.length - activeCount), tone: users.length - activeCount > 0 ? "warning" : "default" },
+          ]}
+        />
+      </div>
       {error ? (
         <p className="mb-4 rounded-md border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive">
           {error}

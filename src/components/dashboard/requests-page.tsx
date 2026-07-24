@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { EmptyState, ErrorState, LoadingTable, PageIntro, Panel, formatDate } from "./page-kit";
+import { EmptyState, ErrorState, LoadingTable, PageIntro, Panel, PaginationBar, StatsStrip, formatDate } from "./page-kit";
 import { StatusBadge } from "./status-ui";
 import { PoolTypeBadge } from "./status-ui";
 import { useAdmin } from "./admin-context";
@@ -16,7 +16,7 @@ import type { AttemptDetail, RequestDetail, RequestListResponse, RequestRecord }
 
 const pageSize = 20;
 
-interface AccountsResponse { accounts: { id: string; poolType?: string }[] }
+interface AccountsResponse { items?: { id: string; poolType?: string }[]; accounts?: { id: string; poolType?: string }[] }
 
 export function RequestsPage() {
   const [page, setPage] = useState(1);
@@ -43,10 +43,10 @@ export function RequestsPage() {
 
   const path = `/api/admin/requests?${params}`;
   const resource = useAdminResource<RequestListResponse>(path);
-  const accountsResource = useAdminResource<AccountsResponse>("/api/admin/accounts");
+  const accountsResource = useAdminResource<AccountsResponse>("/api/admin/accounts?pageSize=500");
   const poolTypeByAccountId = useMemo(() => {
     const map = new Map<string, string>();
-    for (const account of accountsResource.data?.accounts ?? []) {
+    for (const account of (accountsResource.data?.items ?? accountsResource.data?.accounts ?? [])) {
       if (account.poolType) map.set(account.id, account.poolType);
     }
     return map;
@@ -55,7 +55,6 @@ export function RequestsPage() {
 
   const items = resource.data?.items ?? [];
   const total = resource.data?.total ?? 0;
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   return (
     <>
@@ -69,6 +68,17 @@ export function RequestsPage() {
           </Button>
         }
       />
+
+      <div className="mb-4">
+        <StatsStrip
+          items={[
+            { label: "匹配请求", value: total, hint: "当前筛选结果" },
+            { label: "当前页", value: items.length, hint: `第 ${page} 页` },
+            { label: "成功", value: items.filter((item) => item.ok).length, hint: "本页成功数", tone: "success" },
+            { label: "失败", value: items.filter((item) => item.ok === false).length, hint: "本页失败数", tone: "danger" },
+          ]}
+        />
+      </div>
 
       <Panel>
         <div className="flex flex-wrap items-center gap-2 border-b bg-[#fafafa] p-3">
@@ -164,17 +174,13 @@ export function RequestsPage() {
         )}
 
         {total > 0 ? (
-          <div className="flex items-center justify-between gap-3 border-t bg-[#fafafa] px-4 py-2.5 text-xs text-muted-foreground">
-            <span>共 {total} 条 · 第 {page} / {totalPages} 页</span>
-            <div className="flex items-center gap-1">
-              <Button variant="outline" size="sm" disabled={page <= 1 || resource.loading} onClick={() => setPage((p) => Math.max(1, p - 1))}>
-                <ChevronLeft />上一页
-              </Button>
-              <Button variant="outline" size="sm" disabled={page >= totalPages || resource.loading} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}>
-                下一页<ChevronRight />
-              </Button>
-            </div>
-          </div>
+          <PaginationBar
+            page={page}
+            pageSize={pageSize}
+            total={total}
+            loading={resource.loading}
+            onPageChange={setPage}
+          />
         ) : null}
       </Panel>
 

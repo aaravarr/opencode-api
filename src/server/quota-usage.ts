@@ -71,3 +71,24 @@ export function upsertLocalRollingUsage(ownerUserId: string, accountId: string, 
     .run(ownerUserId, accountId, clampedUsage, timestamp, limitValue, signedRemaining)
   return { usagePercent: clampedUsage, limitValue, remainingValue: signedRemaining }
 }
+
+export function isLocallyOverQuota(accountId: string, db: AppDatabase = getDatabase(), now = new Date()): boolean {
+  return computeLocalRollingUsage(accountId, db, now).usagePercent >= 100
+}
+
+/**
+ * Seconds until the oldest successful request in the rolling 24h window ages out.
+ * Used as "day unavailable" recovery time for free-tier accounts that already
+ * burned past 1M tokens and then hit an upstream error.
+ */
+export function secondsUntilRollingWindowRelief(accountId: string, db: AppDatabase = getDatabase(), now = new Date()): number {
+  const windowStartedAt = new Date(now.getTime() - ROLLING_WINDOW_MS).toISOString()
+  const row = db.prepare(`SELECT MIN(started_at) AS oldest
+    FROM gateway_requests
+    WHERE account_id=? AND ok=1 AND started_at>=?`).get(accountId, windowStartedAt) as { oldest: string | null } | undefined
+  if (!row?.oldest) return 24 * 60 * 60
+  const oldestMs = Date.parse(row.oldest)
+  if (!Number.isFinite(oldestMs)) return 24 * 60 * 60
+  const reliefAt = oldestMs + ROLLING_WINDOW_MS
+  return Math.max(60, Math.ceil((reliefAt - now.getTime()) / 1000))
+}

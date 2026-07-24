@@ -22,6 +22,18 @@ describe("usage maintenance candidates", () => {
     expect(listDueUsageCandidates(db, now)).toEqual([{ ownerUserId: "owner", accountId: recent, poolType: "opencode-go" }])
   })
 
+  it("xAI 账号不进入自动额度探测队列", () => {
+    const db = createDatabase(":memory:"); const now = new Date("2026-07-21T12:00:00.000Z")
+    db.prepare("INSERT INTO users(id,username,username_normalized,display_name,role,status,password_hash,created_at,updated_at) VALUES(?,?,?,?,?,'ACTIVE',?,?,?)")
+      .run("owner", "owner", "owner", "Owner", "USER", "hash", now.toISOString(), now.toISOString())
+    const repository = new AccountRepository("owner", db, new SecretVault(encryptionKey))
+    const go = repository.upsertBrowserAccount({ workspaceId: "wrk_go", authCookie: "cookie-go", goApiKey: "sk-go", goKeyId: "key_go", subscriptionState: "ACTIVE", billingGuard: "VERIFIED_GO_ONLY", useBalance: false, usage }).id
+    const xai = repository.createProviderAccount({ name: "xai", poolType: "xai-grok", externalId: "xai-1" }).id
+    db.prepare("UPDATE accounts SET next_usage_check_at=?,last_request_at=? WHERE id=?").run(new Date(now.getTime() - 1_000).toISOString(), new Date(now.getTime() - 5 * 60_000).toISOString(), go)
+    db.prepare("UPDATE accounts SET next_usage_check_at=?,last_request_at=? WHERE id=?").run(new Date(now.getTime() - 1_000).toISOString(), new Date(now.getTime() - 5 * 60_000).toISOString(), xai)
+    expect(listDueUsageCandidates(db, now)).toEqual([{ ownerUserId: "owner", accountId: go, poolType: "opencode-go" }])
+  })
+
   it("重新导入不会恢复已被 xAI 永久封禁的账号", () => {
     const db = createDatabase(":memory:"); const now = new Date().toISOString()
     db.prepare("INSERT INTO users(id,username,username_normalized,display_name,role,status,password_hash,created_at,updated_at) VALUES(?,?,?,?,?,'ACTIVE',?,?,?)")
@@ -33,3 +45,43 @@ describe("usage maintenance candidates", () => {
     expect(reimported).toMatchObject({ id: account.id, name: "grok updated", adminState: "DISABLED", authState: "AUTH_ERROR", disabledReason: "XAI_ACCOUNT_BANNED" })
   })
 })
+
+describe("account list pagination", () => {
+  beforeEach(() => { process.env.TOKEN_ENCRYPTION_KEY = encryptionKey })
+
+  it("supports pool/status filters, stats and paging", () => {
+    const db = createDatabase(":memory:")
+    const now = new Date("2026-07-24T08:00:00.000Z")
+    db.prepare("INSERT INTO users(id,username,username_normalized,display_name,role,status,password_hash,created_at,updated_at) VALUES(?,?,?,?,?,'ACTIVE',?,?,?)")
+      .run("owner", "owner", "owner", "Owner", "USER", "hash", now.toISOString(), now.toISOString())
+    const repository = new AccountRepository("owner", db, new SecretVault(encryptionKey))
+    const ready = repository.createProviderAccount({ name: "ready-xai", poolType: "xai-grok", externalId: "x1", email: "ready@example.com" })
+    const over = repository.createProviderAccount({ name: "over-xai", poolType: "xai-grok", externalId: "x2", email: "over@example.com" })
+    const banned = repository.createProviderAccount({ name: "banned-xai", poolType: "xai-grok", externalId: "x3", email: "banned@example.com" })
+    const go = repository.upsertBrowserAccount({ workspaceId: "wrk_go", authCookie: "cookie", goApiKey: "sk", goKeyId: "key", subscriptionState: "ACTIVE", billingGuard: "VERIFIED_GO_ONLY", useBalance: false, usage })
+
+    repository.updateState(banned.id, { adminState: "DISABLED", disabledReason: "XAI_ACCOUNT_BANNED", disabledAt: now.toISOString() })
+    db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at,limit_value,remaining_value)
+      VALUES(?,?,?,?,NULL,'LOCAL_USAGE',?,?,?)`).run("owner", over.id, "ROLLING_24H", 126.5, now.toISOString(), 1_000_000, -265_000)
+    db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at,limit_value,remaining_value)
+      VALUES(?,?,?,?,NULL,'LOCAL_USAGE',?,?,?)`).run("owner", ready.id, "ROLLING_24H", 12.25, now.toISOString(), 1_000_000, 877_500)
+
+    const all = repository.listPage({ page: 1, pageSize: 2, poolType: "xai-grok", sort: "usage" })
+    expect(all.total).toBe(3)
+    expect(all.items).toHaveLength(2)
+    expect(all.items[0].id).toBe(over.id)
+    expect(all.stats).toMatchObject({ total: 3, overQuota: 1, banned: 1, ready: 1 })
+    expect(all.stats.avgUsagePercent).toBeCloseTo((126.5 + 12.25) / 2, 2)
+
+    const blocked = repository.listPage({ page: 1, pageSize: 50, poolType: "xai-grok", status: "over_quota" })
+    expect(blocked.total).toBe(1)
+    expect(blocked.items.map((item) => item.id)).toEqual([over.id])
+
+    const searched = repository.listPage({ page: 1, pageSize: 50, q: "ready@" })
+    expect(searched.total).toBe(1)
+    expect(searched.items[0].id).toBe(ready.id)
+    expect(searched.stats.byPoolType["xai-grok"]?.total).toBe(1)
+    expect(go.id).toBeTruthy()
+  })
+})
+

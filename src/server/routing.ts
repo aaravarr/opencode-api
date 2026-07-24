@@ -6,6 +6,7 @@ import { getSystemSettings, normalizeOfficialOpenCodeUpstreamUrl } from "./setti
 import type { AccountRecord, PoolType, QuotaKind, RouteSelection } from "./types"
 import { tryGetProvider } from "./providers"
 import { ModelRoutingRepository } from "./repository"
+import { isLocallyOverQuota, secondsUntilRollingWindowRelief } from "./quota-usage"
 
 type Row = Record<string, unknown>
 const nowIso = () => new Date().toISOString()
@@ -297,13 +298,25 @@ export class RoutingService {
 
   markQuota(accountId: string, kind: QuotaKind, retryAfterSeconds: number | null, now = new Date()): void {
     const timestamp = now.toISOString()
-    const retry = retryAfterSeconds && retryAfterSeconds > 0 && retryAfterSeconds <= 45 * 86400 ? retryAfterSeconds : 60
+    const account = this.accounts.get(accountId)
+    // Free-tier xAI: only treat the account as "day unavailable" when local 24h
+    // usage already crossed 1M tokens AND the upstream just errored. Temporary
+    // 429s before over-quota stay short-lived rate-limit blocks.
+    const dayUnavailable = Boolean(account && account.poolType === "xai-grok" && isLocallyOverQuota(accountId, this.db, now))
+    const kindToStore: QuotaKind = dayUnavailable ? "ROLLING_24H" : kind
+    const retry = dayUnavailable
+      ? secondsUntilRollingWindowRelief(accountId, this.db, now)
+      : (retryAfterSeconds && retryAfterSeconds > 0 && retryAfterSeconds <= 45 * 86400 ? retryAfterSeconds : 60)
     const resetAt = new Date(now.getTime() + retry * 1000 + 1000).toISOString()
     this.db.transaction(() => {
       this.db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at)
         VALUES(?,?,?,100,?,'UPSTREAM_429',?) ON CONFLICT(owner_user_id,account_id,kind) DO UPDATE SET
-        usage_percent=100,reset_at=excluded.reset_at,source='UPSTREAM_429',observation_version=observation_version+1,last_observed_at=excluded.last_observed_at`)
-        .run(this.ownerUserId, accountId, kind, resetAt, timestamp)
+        usage_percent=MAX(usage_percent, 100),
+        reset_at=excluded.reset_at,
+        source='UPSTREAM_429',
+        observation_version=observation_version+1,
+        last_observed_at=excluded.last_observed_at`)
+        .run(this.ownerUserId, accountId, kindToStore, resetAt, timestamp)
       this.db.prepare("UPDATE accounts SET last_limit_at=?, updated_at=? WHERE id=? AND owner_user_id=?")
         .run(timestamp, timestamp, accountId, this.ownerUserId)
       const state = this.getState()
@@ -311,7 +324,13 @@ export class RoutingService {
         this.db.prepare("UPDATE routing_state SET current_account_id=NULL,cursor_version=cursor_version+1,updated_at=? WHERE owner_user_id=?")
           .run(timestamp, this.ownerUserId)
       }
-      this.event("ACCOUNT_QUOTA_BLOCKED", "WARN", accountId, null, { kind, resetAt, retryAfterSeconds: retry })
+      this.event("ACCOUNT_QUOTA_BLOCKED", "WARN", accountId, null, {
+        kind: kindToStore,
+        resetAt,
+        retryAfterSeconds: retry,
+        dayUnavailable,
+        localUsageOverQuota: dayUnavailable,
+      })
     })()
   }
 

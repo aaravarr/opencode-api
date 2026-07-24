@@ -315,33 +315,13 @@ export class XAIGrokProvider implements Provider {
   }
 
   async refreshQuota(_accountId: string, account: AccountRecord): Promise<QuotaWindow[]> {
-    // Free-tier quota is only exposed on inference responses. A manual or
-    // scheduled refresh therefore sends the smallest supported probe and
-    // persists the exact limit / remaining / reset values from its headers.
-    const credential = await this.getCredential(account)
-    const resp = await apiFetch(`${XAI_UPSTREAM_BASE_URL}/responses`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${credential.token}`,
-        accept: "application/json, text/event-stream",
-        "content-type": "application/json",
-        "x-grok-client-version": GROK_CLIENT_VERSION,
-        "x-grok-client-mode": "interactive",
-        "user-agent": GROK_CLI_USER_AGENT,
-      },
-      // Match sub2api's proven active-probe shape. The CLI gateway streams the
-      // smallest valid response and exposes the quota snapshot in headers.
-      body: JSON.stringify({ model: "grok-4.5", input: "hi", stream: true }),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    })
-    const windows = this.extractQuotaFromResponse(resp.headers) ?? []
-    if (!resp.ok && resp.status !== 429) {
-      const body = await resp.text()
-      if (isXaiAccountBannedResponse(resp.status, body)) throw new XAIAccountBannedError()
-      throw new Error(`xAI 额度探测失败（HTTP ${resp.status}）`)
-    }
-    try { await resp.body?.cancel() } catch { /* Headers are sufficient. */ }
-    return windows.map((window) => ({ ...window, source: "API_PROBE" as const }))
+    // Free-tier quota headers are unreliable (often remaining=limit forever).
+    // Do not spend a live probe request here; local 24h request logs are the
+    // source of truth for usage, and real unavailability comes from upstream
+    // errors after the account is already over 1M tokens.
+    void _accountId
+    void account
+    return []
   }
 
   extractQuotaFromResponse(headers: Headers): QuotaWindow[] | null {
@@ -492,6 +472,17 @@ export class XAIGrokProvider implements Provider {
         shouldSwitchAccount: true,
         errorType: "XAI_ACCOUNT_BANNED",
         permanentlyDisableAccount: true,
+      }
+    }
+    // 402 payment-required / quota exceeded on free tier: switch account.
+    // Whether this is treated as "day unavailable" is decided by routing when
+    // local 24h usage is already past 1M tokens.
+    if (status === 402) {
+      return {
+        shouldSwitchAccount: true,
+        quotaKind: "ROLLING_24H",
+        retryAfterSeconds: 60,
+        errorType: "XAI_PAYMENT_OR_QUOTA_REQUIRED",
       }
     }
     if (status === 429) {

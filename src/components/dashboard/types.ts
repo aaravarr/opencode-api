@@ -156,6 +156,31 @@ export interface RequestDetail {
   attempts: AttemptDetail[];
 }
 
+
+export interface AccountListStats {
+  total: number;
+  ready: number;
+  blocked: number;
+  disabled: number;
+  banned: number;
+  authError: number;
+  inactive: number;
+  overQuota: number;
+  avgUsagePercent: number | null;
+  byPoolType?: Record<string, { total: number; ready: number; blocked: number; inactive: number; overQuota?: number }>;
+}
+
+export interface AccountListResponse {
+  items?: Account[];
+  accounts?: Account[];
+  total: number;
+  page: number;
+  pageSize: number;
+  stats?: AccountListStats;
+  poolPreferences?: Record<string, string | null>;
+  poolTypes?: Array<{ type: string; label: string; description?: string; quotaKinds?: string[] }>;
+}
+
 export interface RequestListResponse {
   items: RequestRecord[];
   total: number;
