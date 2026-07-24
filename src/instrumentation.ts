@@ -4,4 +4,11 @@ export async function register() {
   startMaintenanceScheduler()
   const { startImportJobRunner } = await import("@/server/import-jobs")
   startImportJobRunner()
+  // Best-effort: refresh provider model catalogs after boot so routing uses
+  // live /models data instead of only hardcoded defaults.
+  void import("@/server/provider-models").then(({ syncAllProviderModels }) =>
+    syncAllProviderModels().catch((error) => {
+      console.error("[provider-models] startup sync failed", error instanceof Error ? error.message : error)
+    }),
+  )
 }

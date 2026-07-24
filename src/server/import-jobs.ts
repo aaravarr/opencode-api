@@ -6,7 +6,6 @@ import { AccountRepository, ProviderCredentialRepository } from "./repository"
 import type { PoolType } from "./types"
 import { convertSsoToBuild, decodeJwtClaims, jwtClaimString } from "./xai-sso-device"
 import { exchangeXaiRefreshToken } from "./providers/xai-grok"
-import { syncProviderAccount } from "./provider-sync"
 import { tryGetProvider } from "./providers"
 
 export const IMPORT_FORMATS = ["sub2api-json", "cpa-json", "refresh-token", "xai-sso"] as const
@@ -282,15 +281,39 @@ async function importSeed(ownerUserId: string, jobId: string, index: number, ini
   if (seed.concurrency && seed.concurrency > 0) accounts.updateState(account.id, { maxConcurrency: Math.min(64, seed.concurrency) })
 
   updateItem(db, jobId, index, "RUNNING", seed.poolType === "xai-grok" ? "正在探测真实额度" : "正在验证账号", account.id)
-  if (seed.poolType === "xai-grok") {
-    await syncProviderAccount(ownerUserId, account.id, db)
-  } else {
-    const provider = tryGetProvider(seed.poolType)
-    const latest = accounts.get(account.id)
-    if (provider && latest) {
-      const validation = await provider.validateCredential(latest)
-      if (!validation.valid) throw new Error("上游未接受该账号凭据")
+  // Account + credentials are already persisted. Post-import probe/validation is
+  // best-effort: bulk xAI SSO imports can hit temporary 403/rate-limit noise on
+  // the probe endpoint even when the OAuth tokens are valid for later inference.
+  try {
+    if (seed.poolType === "xai-grok") {
+      const { syncProviderAccount } = await import("./provider-sync")
+      await syncProviderAccount(ownerUserId, account.id, db)
+    } else {
+      const provider = tryGetProvider(seed.poolType)
+      const latest = accounts.get(account.id)
+      if (provider && latest) {
+        const validation = await provider.validateCredential(latest)
+        if (!validation.valid) throw new Error("上游未接受该账号凭据")
+      }
     }
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : "导入后探测失败"
+    // Keep the account usable; surface the probe error without failing the job item.
+    accounts.updateState(account.id, {
+      adminState: "ENABLED",
+      authState: "VALID",
+      disabledReason: null,
+      disabledAt: null,
+      lastError: message.slice(0, 500),
+    })
+    updateItem(db, jobId, index, "RUNNING", `账号已保存，探测失败：${message.slice(0, 80)}`, account.id)
+  }
+  // Newly imported ready account: refresh that provider's model catalog.
+  try {
+    const { syncProviderModelsForAccount } = await import("./provider-models")
+    await syncProviderModelsForAccount(ownerUserId, account.id, db)
+  } catch {
+    // Model catalog refresh is best-effort and must not fail the import.
   }
   return account.id
 }

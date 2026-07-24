@@ -17,7 +17,7 @@ export interface CredentialProvider { get(ownerUserId: string, accountId: string
 
 type GoLimit = { kind: QuotaKind; retryAfterSeconds: number | null }
 const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
-const MAX_ERROR_CHARS = 500
+const MAX_ERROR_CHARS = 2_000
 
 interface RequestFinalizeInput {
   status: number
@@ -76,6 +76,50 @@ function safeParse(body: string): unknown {
 function truncateError(value: string | null | undefined): string | null {
   if (!value) return null
   return value.length > MAX_ERROR_CHARS ? value.slice(0, MAX_ERROR_CHARS) : value
+}
+
+/**
+ * Serialize transport/runtime failures for request logs. undici often puts the
+ * useful detail on `error.cause` / AggregateError.errors while leaving
+ * `message` as "fetch failed" or even empty.
+ */
+export function formatErrorDetail(cause: unknown, depth = 0): string {
+  if (cause == null) return depth === 0 ? "Upstream request failed" : String(cause)
+  if (typeof cause === "string") return cause.trim() || (depth === 0 ? "Upstream request failed" : "<empty>")
+  if (typeof cause !== "object") return String(cause)
+
+  const err = cause as Error & {
+    code?: unknown
+    errno?: unknown
+    syscall?: unknown
+    address?: unknown
+    port?: unknown
+    cause?: unknown
+    errors?: unknown
+  }
+  const parts: string[] = []
+  const name = typeof err.name === "string" && err.name && err.name !== "Error" ? err.name : null
+  const message = typeof err.message === "string" ? err.message.trim() : ""
+  if (name && message) parts.push(`${name}: ${message}`)
+  else if (message) parts.push(message)
+  else if (name) parts.push(name)
+  else if (depth === 0) parts.push("Upstream request failed")
+
+  const extras: string[] = []
+  for (const key of ["code", "errno", "syscall", "address", "port"] as const) {
+    const value = err[key]
+    if (value != null && String(value) !== "") extras.push(`${key}=${String(value)}`)
+  }
+  if (extras.length) parts.push(extras.join(" "))
+
+  if (Array.isArray(err.errors) && err.errors.length && depth < 3) {
+    parts.push(`errors=[${err.errors.map((item) => formatErrorDetail(item, depth + 1)).join("; ")}]`)
+  }
+  if (err.cause !== undefined && depth < 4) {
+    parts.push(`cause: ${formatErrorDetail(err.cause, depth + 1)}`)
+  }
+
+  return parts.join(" | ") || "Upstream request failed"
 }
 
 function parseRetryAfter(response: Response): number | null {
@@ -380,7 +424,7 @@ export class GatewayService {
         this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: 1, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta })
         return new Response(upstream.body, { status, headers: responseHeaders(upstream.headers) })
       } catch (cause) {
-        const message = cause instanceof Error ? cause.message : "Upstream request failed"
+        const message = formatErrorDetail(cause)
         this.finishAttempt(attemptId, 502, "RETURN_DIRECTLY", "NETWORK", Date.now() - attemptStartedAt, message, selection.account.name)
         this.finalizeRequest(requestId, { status: 502, outcome: "NETWORK", attempts: attemptNumber, ok: 0, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, error: message, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta })
         return Response.json({ error: { type: "upstream_transport_error", message } }, { status: 502 })

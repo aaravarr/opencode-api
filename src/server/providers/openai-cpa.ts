@@ -389,7 +389,36 @@ export class OpenAICPAProvider implements Provider {
   // ── Models ─────────────────────────────────────────────────────────────
 
   getAvailableModels(_accounts: AccountRecord[]): string[] {
+    return this.readCachedModels() ?? [...CODEX_MODELS]
+  }
+
+  getDefaultModels(): string[] {
     return [...CODEX_MODELS]
+  }
+
+  supportsModel(model: string): boolean {
+    return this.getAvailableModels([]).includes(model)
+  }
+
+  async fetchRemoteModels(account: AccountRecord): Promise<string[] | null> {
+    // Codex backend does not expose a stable public /models list for PAT/OAuth.
+    // Keep defaults; callers still get a deterministic catalog.
+    void account
+    return null
+  }
+
+  private readCachedModels(): string[] | null {
+    try {
+      const db = getDatabase()
+      const row = db.prepare("SELECT models_json FROM provider_model_cache WHERE pool_type=?").get(this.poolType) as { models_json: string } | undefined
+      if (!row?.models_json) return null
+      const parsed = JSON.parse(row.models_json) as unknown
+      if (!Array.isArray(parsed)) return null
+      const models = parsed.filter((item): item is string => typeof item === "string" && item.length > 0)
+      return models.length ? models : null
+    } catch {
+      return null
+    }
   }
 
   resolveModel(_account: AccountRecord, requestedModel: string): string {

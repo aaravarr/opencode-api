@@ -29,7 +29,7 @@ export class OpenCodeWebService {
       this.client.dashboard(input.authCookie, input.workspaceId),
     ])
     const verified = dashboard.subscriptionExists && dashboard.useBalance === false
-    return this.repository.upsertBrowserAccount({
+    const account = this.repository.upsertBrowserAccount({
       name: input.name,
       workspaceId: input.workspaceId,
       email: managedKey.email,
@@ -46,6 +46,12 @@ export class OpenCodeWebService {
       useBalance: dashboard.useBalance,
       usage: dashboard.usage,
     })
+    if (verified) {
+      void import("@/server/provider-models").then(({ syncProviderModelsForAccount }) =>
+        syncProviderModelsForAccount(this.ownerUserId, account.id).catch(() => undefined),
+      )
+    }
+    return account
   }
 
   async credential(accountId: string): Promise<AccessCredential> {

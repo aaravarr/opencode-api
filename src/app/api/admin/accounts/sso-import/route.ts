@@ -43,6 +43,7 @@ export async function POST(request: Request) {
   const db = getDatabase()
   const accountRepo = new AccountRepository(user.id, db)
   const credRepo = new ProviderCredentialRepository(user.id, db)
+  const ownerUserId = user.id
 
   const created: ImportSuccess[] = []
   const failed: ImportFailure[] = []
@@ -81,6 +82,10 @@ export async function POST(request: Request) {
       if (email) credData.email = email
 
       credRepo.upsert({ accountId: account.id, poolType: "xai-grok", credentialData: credData })
+
+      void import("@/server/provider-models").then(({ syncProviderModelsForAccount }) =>
+        syncProviderModelsForAccount(ownerUserId, account.id, db).catch(() => undefined),
+      )
 
       return { index: item.index, ok: true, data: { index: item.index, name, email, accountId: account.id } }
     } catch (cause) {

@@ -35,6 +35,17 @@ function isAccountReady(account: ReturnType<AccountRepository["list"]>[number]):
     && account.useBalance === false
 }
 
+function providerSupportsModel(poolType: PoolType, model: string | null): boolean {
+  // No model on the request (e.g. non-inference endpoints) → every pool is fine.
+  if (!model) return true
+  const provider = tryGetProvider(poolType)
+  if (!provider) return true
+  if (typeof provider.supportsModel === "function") return provider.supportsModel(model)
+  // Prefer cached catalog when present; getAvailableModels already falls back to defaults.
+  const catalog = provider.getAvailableModels([])
+  return catalog.length === 0 || catalog.includes(model)
+}
+
 export class RoutingService {
   private readonly accounts: AccountRepository
   private readonly modelRouting: ModelRoutingRepository
@@ -136,13 +147,22 @@ export class RoutingService {
       }
 
       const otherwiseEligible = all.filter(isAccountReady)
-      const eligible = otherwiseEligible.filter((account) => !blocked.has(account.id)
+      // Prefer accounts whose provider can actually serve the requested model.
+      // e.g. glm-* must not land on xAI just because the previous seat was xAI.
+      const modelCapable = otherwiseEligible.filter((account) => providerSupportsModel(account.poolType, this.currentModel))
+      // When a model is present and no provider claims it, fail closed instead of
+      // shipping the request to an incompatible upstream that will 404.
+      if (this.currentModel && modelCapable.length === 0 && otherwiseEligible.length > 0) {
+        throw new NoEligibleAccountError("NO_ELIGIBLE")
+      }
+      const capabilityPool = modelCapable.length > 0 ? modelCapable : otherwiseEligible
+      const eligible = capabilityPool.filter((account) => !blocked.has(account.id)
         && !triedAccountIds.has(account.id)
         && (inFlight.get(account.id) ?? 0) < account.maxConcurrency)
 
       if (!eligible.length) {
-        if (otherwiseEligible.length > 0 && otherwiseEligible.every((account) => blocked.has(account.id))) {
-          const ids = new Set(otherwiseEligible.map((account) => account.id))
+        if (capabilityPool.length > 0 && capabilityPool.every((account) => blocked.has(account.id))) {
+          const ids = new Set(capabilityPool.map((account) => account.id))
           const resetTimes = activeBlocks
             .filter((block) => ids.has(block.account_id) && block.reset_at)
             .map((block) => block.reset_at!)
@@ -156,7 +176,15 @@ export class RoutingService {
       }
 
       // Model routing: determine pool type priority from routing rules.
-      const poolTypePriority = this.currentModel ? this.modelRouting.resolveModelPriority(this.currentModel) : null
+      // Drop priority entries that cannot serve the model so "grok-* → xai first"
+      // never forces unsupported models onto xAI when the rule is unrelated.
+      const rawPriority = this.currentModel ? this.modelRouting.resolveModelPriority(this.currentModel) : null
+      const poolTypePriority = rawPriority
+        ? (() => {
+          const filtered = rawPriority.filter((pt) => providerSupportsModel(pt as PoolType, this.currentModel))
+          return filtered.length > 0 ? filtered : null
+        })()
+        : null
       // For rolling-day pools (xAI free), pick the account with the most
       // remaining quota first to flatten the aggregated daily budget and avoid
       // burning each seat to 100% before moving on. Go/OpenAI pools keep the
@@ -207,20 +235,33 @@ export class RoutingService {
         if (selected && poolTypePriority && poolTypePriority.length > 0 && selected.poolType !== poolTypePriority[0]) selected = undefined
       }
       if (!selected) {
-        const currentPool = all.find((account) => account.id === state.currentAccountId)?.poolType
         const priorityPool = poolTypePriority?.[0] as PoolType | undefined
-        const rollingPool = currentPool && isRollingDayPool(currentPool)
-          ? currentPool
-          : priorityPool && isRollingDayPool(priorityPool)
-            ? priorityPool
-            : eligible.every((account) => isRollingDayPool(account.poolType))
-              ? eligible[0].poolType
-              : null
+        // Only stay inside a rolling-window pool when model routing explicitly
+        // prioritizes it, or when every eligible account is rolling. Do NOT
+        // inherit the previous request's xAI seat for unrelated models
+        // (e.g. glm after grok), otherwise unmatched models keep 404ing on xAI.
+        const rollingPool = priorityPool && isRollingDayPool(priorityPool)
+          ? priorityPool
+          : eligible.every((account) => isRollingDayPool(account.poolType))
+            ? eligible[0].poolType
+            : null
         if (rollingPool) {
           selected = ordered.filter((account) => account.poolType === rollingPool).sort(usageAwareCompare)[0]
+          // Priority pool exhausted: fall through to the next ordered candidate.
+          if (!selected && poolTypePriority && poolTypePriority.length > 1) {
+            selected = ordered.find((account) => account.poolType !== rollingPool) ?? ordered[0]
+          }
         } else {
-          const anchor = all.find((account) => account.id === (state.currentAccountId ?? state.preferredAccountId))?.ordinal ?? -1
-          selected = ordered.find((account) => account.ordinal > anchor) ?? ordered[0]
+          // Mixed pools without a model rule: prefer non-rolling accounts so a
+          // previous grok/xAI request cannot pin subsequent glm traffic.
+          const candidates = ordered.some((account) => !isRollingDayPool(account.poolType))
+            ? ordered.filter((account) => !isRollingDayPool(account.poolType))
+            : ordered
+          const anchorAccount = all.find((account) => account.id === (state.currentAccountId ?? state.preferredAccountId))
+          const anchor = anchorAccount && candidates.some((account) => account.id === anchorAccount.id)
+            ? anchorAccount.ordinal
+            : -1
+          selected = candidates.find((account) => account.ordinal > anchor) ?? candidates[0]
         }
       }
 

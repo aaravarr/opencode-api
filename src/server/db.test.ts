@@ -15,6 +15,7 @@ describe("database schema", () => {
     expect(quotaColumns).toEqual(expect.arrayContaining(["limit_value", "remaining_value"]))
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='import_jobs'").get()).toEqual({ name: "import_jobs" })
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='import_job_items'").get()).toEqual({ name: "import_job_items" })
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='provider_model_cache'").get()).toEqual({ name: "provider_model_cache" })
     db.close()
   })
 

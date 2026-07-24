@@ -109,6 +109,26 @@ const GROK_MODELS = [
   "grok-imagine-video-1.5",
 ] as const
 
+function parseOpenAiModelList(body: string): string[] {
+  const parsed = JSON.parse(body) as { data?: unknown; models?: unknown } | unknown[]
+  const rows = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray((parsed as { data?: unknown }).data)
+      ? (parsed as { data: unknown[] }).data
+      : Array.isArray((parsed as { models?: unknown }).models)
+        ? (parsed as { models: unknown[] }).models
+        : []
+  const models = new Set<string>()
+  for (const row of rows) {
+    if (typeof row === "string" && row.trim()) models.add(row.trim())
+    else if (row && typeof row === "object") {
+      const id = (row as { id?: unknown; name?: unknown }).id ?? (row as { name?: unknown }).name
+      if (typeof id === "string" && id.trim()) models.add(id.trim())
+    }
+  }
+  return [...models].sort((a, b) => a.localeCompare(b))
+}
+
 const SUPPORTED_QUOTA_KINDS: readonly QuotaKind[] = ["ROLLING_24H"]
 
 // Headers forwarded from the incoming request to the upstream.
@@ -373,7 +393,47 @@ export class XAIGrokProvider implements Provider {
   // ── Models ─────────────────────────────────────────────────────────────
 
   getAvailableModels(): string[] {
+    return this.readCachedModels() ?? [...GROK_MODELS]
+  }
+
+  getDefaultModels(): string[] {
     return [...GROK_MODELS]
+  }
+
+  supportsModel(model: string): boolean {
+    return this.getAvailableModels().includes(model)
+  }
+
+  async fetchRemoteModels(account: AccountRecord): Promise<string[] | null> {
+    const credential = await this.getCredential(account)
+    const resp = await apiFetch(`${XAI_UPSTREAM_BASE_URL}/models`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${credential.token}`,
+        accept: "application/json",
+        "user-agent": GROK_CLI_USER_AGENT,
+        "x-grok-client-version": GROK_CLIENT_VERSION,
+        "x-grok-client-mode": "interactive",
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+    const body = await resp.text()
+    if (!resp.ok) throw new Error(`xAI /models 拉取失败（HTTP ${resp.status}）: ${body.slice(0, 200)}`)
+    return parseOpenAiModelList(body)
+  }
+
+  private readCachedModels(): string[] | null {
+    try {
+      const db = getDatabase()
+      const row = db.prepare("SELECT models_json FROM provider_model_cache WHERE pool_type=?").get(this.poolType) as { models_json: string } | undefined
+      if (!row?.models_json) return null
+      const parsed = JSON.parse(row.models_json) as unknown
+      if (!Array.isArray(parsed)) return null
+      const models = parsed.filter((item): item is string => typeof item === "string" && item.length > 0)
+      return models.length ? models : null
+    } catch {
+      return null
+    }
   }
 
   resolveModel(_account: AccountRecord, requestedModel: string): string {

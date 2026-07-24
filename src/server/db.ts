@@ -266,6 +266,16 @@ CREATE TABLE IF NOT EXISTS model_routing (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS model_routing_owner_idx ON model_routing(owner_user_id, enabled);
+
+CREATE TABLE IF NOT EXISTS provider_model_cache (
+  pool_type TEXT PRIMARY KEY,
+  models_json TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'DEFAULT',
+  account_id TEXT,
+  error TEXT,
+  fetched_at TEXT,
+  updated_at TEXT NOT NULL
+);
 `
 
 export function createDatabase(filename: string): AppDatabase {
@@ -377,7 +387,7 @@ function resetLegacyAccountDomain(db: AppDatabase): void {
   }
 }
 
-const CURRENT_ACCOUNT_SCHEMA_VERSION = 6
+const CURRENT_ACCOUNT_SCHEMA_VERSION = 7
 const globalDatabase = globalThis as typeof globalThis & {
   __opencodeApiDb?: AppDatabase
   __opencodeApiAccountSchemaVersion?: number

@@ -114,7 +114,7 @@ export async function POST(request: Request) {
   let imported = 0
   let skipped = 0
   const errors: { name: string; message: string }[] = []
-  const importedAccounts: unknown[] = []
+  const importedAccounts: { id: string; name: string; poolType: string }[] = []
 
   for (const acct of parsed.data.accounts) {
     const poolType = resolvePoolType(acct.platform, acct.type, acct.credentials)
@@ -215,6 +215,17 @@ export async function POST(request: Request) {
     } catch (cause) {
       errors.push({ name: acct.name, message: cause instanceof Error ? cause.message : "Unknown error" })
     }
+  }
+
+  // Best-effort model catalog refresh for each newly imported pool type.
+  const poolTypes = [...new Set(importedAccounts.map((item) => item.poolType))]
+  if (poolTypes.length) {
+    void import("@/server/provider-models").then(async ({ syncProviderModels }) => {
+      for (const poolType of poolTypes) {
+        const accountId = importedAccounts.find((item) => item.poolType === poolType)?.id
+        await syncProviderModels({ poolType: poolType as PoolType, ownerUserId: user.id, accountId, db }).catch(() => undefined)
+      }
+    })
   }
 
   return Response.json({ imported, skipped, errors, accounts: importedAccounts }, { status: 201 })

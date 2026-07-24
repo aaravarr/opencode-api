@@ -108,4 +108,44 @@ describe("durable import runner", () => {
     ])
     db.close()
   })
+
+  it("xAI 导入后额度探测失败时仍记为成功（账号已落库）", async () => {
+    const db = createDatabase(":memory:")
+    const timestamp = new Date().toISOString()
+    db.prepare("INSERT INTO users(id,username,username_normalized,display_name,role,status,password_hash,created_at,updated_at) VALUES (?,?,?,?,?,'ACTIVE',?,?,?)")
+      .run("import-owner", "import-owner", "import-owner", "Import owner", "USER", "hash", timestamp, timestamp)
+
+    const seeds = [{ label: "probe-fail@example.com", poolType: "xai-grok", accessToken: "access-token", refreshToken: "refresh-token", email: "probe-fail@example.com" }]
+    db.prepare(`INSERT INTO import_jobs(id,owner_user_id,pool_type,format,status,total_items,processed_items,succeeded_items,failed_items,current_step,payload_ciphertext,created_at,updated_at)
+      VALUES('probe-job','import-owner','xai-grok','cpa-json','QUEUED',1,0,0,0,'等待处理',?,?,?)`)
+      .run(new SecretVault().encrypt(JSON.stringify(seeds)), timestamp, timestamp)
+    db.prepare(`INSERT INTO import_job_items(id,job_id,item_index,label,status,step,created_at,updated_at)
+      VALUES('probe-item','probe-job',0,'probe-fail@example.com','QUEUED','等待处理',?,?)`)
+      .run(timestamp, timestamp)
+
+    const providerSync = await import("./provider-sync")
+    vi.spyOn(providerSync, "syncProviderAccount").mockRejectedValue(new Error("xAI 账号已被上游禁止访问"))
+
+    const { runImportJob } = await import("./import-jobs")
+    await runImportJob("probe-job", db)
+    const finished = db.prepare("SELECT status,processed_items,succeeded_items,failed_items,current_step FROM import_jobs WHERE id='probe-job'").get() as {
+      status: string; processed_items: number; succeeded_items: number; failed_items: number; current_step: string
+    }
+    expect(finished).toMatchObject({ status: "COMPLETED", processed_items: 1, succeeded_items: 1, failed_items: 0 })
+    expect(finished.current_step).toBe("全部导入完成")
+
+    const item = db.prepare("SELECT status,step,account_id,error FROM import_job_items WHERE job_id='probe-job'").get() as {
+      status: string; step: string; account_id: string | null; error: string | null
+    }
+    expect(item.status).toBe("COMPLETED")
+    expect(item.account_id).toBeTruthy()
+    expect(item.error).toBeNull()
+
+    const account = db.prepare("SELECT admin_state,auth_state,last_error FROM accounts WHERE id=?").get(item.account_id) as {
+      admin_state: string; auth_state: string; last_error: string | null
+    }
+    expect(account).toMatchObject({ admin_state: "ENABLED", auth_state: "VALID" })
+    expect(account.last_error).toContain("禁止访问")
+    db.close()
+  })
 })

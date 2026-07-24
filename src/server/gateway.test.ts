@@ -23,6 +23,11 @@ function setup(poolType: "opencode-go" | "xai-grok" = "opencode-go") {
   return { db, apiKey: apiKey.key, credentials, hasher }
 }
 const request = (key: string) => new Request("http://localhost/v1/responses", { method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify({ model: "test" }) })
+const requestWithModel = (key: string, model: string, endpoint = "responses") => new Request(`http://localhost/v1/${endpoint}`, {
+  method: "POST",
+  headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+  body: JSON.stringify({ model }),
+})
 
 describe("gateway", () => {
   beforeEach(() => { process.env.TOKEN_ENCRYPTION_KEY = encryptionKey })
@@ -82,7 +87,7 @@ describe("gateway", () => {
       controller.close()
     } })
     const fetcher = vi.fn().mockResolvedValue(new Response(stream, { headers: { "content-type": "text/event-stream" } }))
-    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "responses")
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(requestWithModel(apiKey, "grok-4.5"), "responses")
     expect(response.status).toBe(200)
     expect(fetcher).toHaveBeenCalledTimes(1)
     expect(db.prepare("SELECT COUNT(*) AS value FROM quota_windows WHERE kind='PROVIDER_RATE_LIMIT'").get()).toEqual({ value: 0 })
@@ -97,7 +102,7 @@ describe("gateway", () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(new Response(limitedStream, { headers: { "content-type": "text/event-stream" } }))
       .mockResolvedValueOnce(Response.json({ id: "ok" }))
-    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "responses")
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(requestWithModel(apiKey, "grok-4.5"), "responses")
     expect(response.status).toBe(200)
     expect(fetcher).toHaveBeenCalledTimes(2)
     expect(db.prepare("SELECT COUNT(*) AS value FROM quota_windows WHERE kind='PROVIDER_RATE_LIMIT'").get()).toEqual({ value: 1 })
@@ -110,7 +115,7 @@ describe("gateway", () => {
       "x-ratelimit-remaining-tokens": "750000",
       "x-ratelimit-reset-tokens": String(Math.floor(Date.now() / 1000) + 3600),
     } }))
-    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "chat/completions")
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(requestWithModel(apiKey, "grok-4.5", "chat/completions"), "chat/completions")
     expect(response.status).toBe(200)
     const quota = db.prepare("SELECT kind,usage_percent,source FROM quota_windows WHERE kind='ROLLING_24H'").get() as { kind: string; usage_percent: number; source: string }
     expect(quota).toEqual({ kind: "ROLLING_24H", usage_percent: 25, source: "UPSTREAM_HEADER" })
@@ -125,7 +130,7 @@ describe("gateway", () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ error: { type: "rate_limit_error" } }), { status: 429 }))
       .mockResolvedValueOnce(Response.json({ id: "ok" }))
-    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "responses")
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(requestWithModel(apiKey, "grok-4.5"), "responses")
     expect(response.status).toBe(200)
     expect(fetcher).toHaveBeenCalledTimes(2)
     expect(db.prepare("SELECT usage_percent,limit_value,remaining_value,source FROM quota_windows WHERE account_id=? AND kind='ROLLING_24H'").get(preferred.id))
@@ -138,7 +143,7 @@ describe("gateway", () => {
     const { db, apiKey, credentials, hasher } = setup("xai-grok")
     const denied = JSON.stringify({ code: "permission-denied", error: "Access to the chat endpoint is denied. Please ensure you're using the correct credentials." })
     const fetcher = vi.fn().mockResolvedValueOnce(new Response(denied, { status: 403 })).mockResolvedValueOnce(Response.json({ id: "ok" }))
-    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "chat/completions")
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(requestWithModel(apiKey, "grok-4.5", "chat/completions"), "chat/completions")
     expect(response.status).toBe(200)
     expect(fetcher).toHaveBeenCalledTimes(2)
     const disabled = db.prepare("SELECT admin_state,auth_state,disabled_reason FROM accounts WHERE disabled_reason='XAI_ACCOUNT_BANNED'").get()
@@ -155,6 +160,31 @@ describe("gateway", () => {
     const { db, apiKey, credentials, hasher } = setup(); const fetcher = vi.fn()
     const response = await new GatewayService(credentials, db, fetcher, hasher).handle(new Request("http://localhost/v1/responses", { method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-length": String(10 * 1024 * 1024 + 1) }, body: "{}" }), "responses")
     expect(response.status).toBe(413); expect(fetcher).not.toHaveBeenCalled()
+  })
+
+  it("NETWORK 失败会把 cause 链与 code 记入请求日志", async () => {
+    const { db, apiKey, credentials, hasher } = setup()
+    const root = Object.assign(new Error("socket hang up"), { code: "ECONNRESET", syscall: "read" })
+    const wrapped = new Error("fetch failed", { cause: root })
+    const fetcher = vi.fn().mockRejectedValue(wrapped)
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(request(apiKey), "responses")
+    expect(response.status).toBe(502)
+    const body = await response.json() as { error?: { type?: string; message?: string } }
+    expect(body.error?.type).toBe("upstream_transport_error")
+    expect(body.error?.message).toContain("fetch failed")
+    expect(body.error?.message).toContain("ECONNRESET")
+    expect(body.error?.message).toContain("socket hang up")
+
+    const row = db.prepare("SELECT outcome,error FROM gateway_requests ORDER BY started_at DESC LIMIT 1").get() as { outcome: string; error: string | null }
+    expect(row.outcome).toBe("NETWORK")
+    expect(row.error).toContain("fetch failed")
+    expect(row.error).toContain("code=ECONNRESET")
+    expect(row.error).toContain("syscall=read")
+    expect(row.error).toContain("socket hang up")
+
+    const attempt = db.prepare("SELECT error_type,error_message FROM gateway_attempts ORDER BY started_at DESC LIMIT 1").get() as { error_type: string; error_message: string | null }
+    expect(attempt.error_type).toBe("NETWORK")
+    expect(attempt.error_message).toContain("ECONNRESET")
   })
 })
 

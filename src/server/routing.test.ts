@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest"
 import { createDatabase } from "./db"
 import { SecretVault } from "./crypto"
-import { AccountRepository } from "./repository"
+import { AccountRepository, ModelRoutingRepository } from "./repository"
 import { NoEligibleAccountError, RoutingService } from "./routing"
 
 const encryptionKey = Buffer.alloc(32, 4).toString("base64")
@@ -118,6 +118,9 @@ describe("routing", () => {
     db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at)
       VALUES(?,?,'ROLLING_24H',85,NULL,'UPSTREAM_HEADER',?),(?,?,'ROLLING_24H',15,NULL,'UPSTREAM_HEADER',?)`)
       .run(ownerUserId, highUsage.id, observedAt, ownerUserId, lowUsage.id, observedAt)
+    // Route grok traffic to xAI so the go-account does not steal the selection.
+    new ModelRoutingRepository(ownerUserId, db).create("grok-*", ["xai-grok"])
+    routing.setModel("grok-4.5")
     routing.setPreferred(highUsage.id)
     routing.setPreferred(null)
     expect(routing.select("mixed-pool-request", "responses", new Set()).account.id).toBe(lowUsage.id)
@@ -136,5 +139,31 @@ describe("routing", () => {
       .toEqual({ usage_percent: 25, reset_at: null, source: "UPSTREAM_HEADER" })
     expect(db.prepare("SELECT usage_percent,source FROM quota_windows WHERE account_id=? AND kind='PROVIDER_RATE_LIMIT'").get(account.id))
       .toEqual({ usage_percent: 100, source: "UPSTREAM_429" })
+  })
+
+  it("glm 请求只路由到支持该模型的 provider，不会因为上一次 grok 粘在 xAI", () => {
+    const { db, accounts, routing, add } = make()
+    const go = add("go-for-glm")
+    const xai = accounts.createProviderAccount({ name: "xAI sticky", poolType: "xai-grok", externalId: "xai-sticky" })
+    // Simulate a previous grok request that left currentAccountId on xAI.
+    db.prepare("UPDATE routing_state SET current_account_id=?, cursor_version=cursor_version+1, updated_at=? WHERE owner_user_id=?")
+      .run(xai.id, new Date().toISOString(), ownerUserId)
+    routing.setModel("glm-5.2")
+    const selected = routing.select("glm-after-grok", "chat/completions", new Set())
+    expect(selected.account.id).toBe(go)
+    expect(selected.account.poolType).toBe("opencode-go")
+  })
+
+  it("模型路由规则只影响匹配模型，不把不支持的模型打到优先号池", () => {
+    const { db, accounts, routing, add } = make()
+    const go = add("go-glm")
+    accounts.createProviderAccount({ name: "xAI only-grok", poolType: "xai-grok", externalId: "xai-only-grok" })
+    // Even if someone misconfigures a broad priority that starts with xAI,
+    // unsupported models must skip that pool.
+    new ModelRoutingRepository(ownerUserId, db).create("glm-*", ["xai-grok", "opencode-go"])
+    routing.setModel("glm-5.2")
+    const selected = routing.select("glm-priority-skip-xai", "chat/completions", new Set())
+    expect(selected.account.id).toBe(go)
+    expect(selected.account.poolType).toBe("opencode-go")
   })
 })

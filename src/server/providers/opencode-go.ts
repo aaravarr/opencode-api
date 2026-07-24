@@ -3,6 +3,7 @@ import type { AccountRecord, QuotaKind } from "../types"
 import { SecretVault } from "../crypto"
 import { getDatabase } from "../db"
 import { getSystemSettings, normalizeOfficialOpenCodeUpstreamUrl } from "../settings"
+import { apiFetch } from "../api-fetch"
 
 // OpenAI Codex models served by the OpenCode Go upstream.
 const OPENCODE_GO_MODELS = [
@@ -16,6 +17,26 @@ const OPENCODE_GO_MODELS = [
   "o3",
   "o4-mini",
 ]
+
+function parseOpenAiModelList(body: string): string[] {
+  const parsed = JSON.parse(body) as { data?: unknown; models?: unknown } | unknown[]
+  const rows = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray((parsed as { data?: unknown }).data)
+      ? (parsed as { data: unknown[] }).data
+      : Array.isArray((parsed as { models?: unknown }).models)
+        ? (parsed as { models: unknown[] }).models
+        : []
+  const models = new Set<string>()
+  for (const row of rows) {
+    if (typeof row === "string" && row.trim()) models.add(row.trim())
+    else if (row && typeof row === "object") {
+      const id = (row as { id?: unknown; name?: unknown }).id ?? (row as { name?: unknown }).name
+      if (typeof id === "string" && id.trim()) models.add(id.trim())
+    }
+  }
+  return [...models].sort((a, b) => a.localeCompare(b))
+}
 
 // Parse GoUsageLimitError from upstream response body.
 function classifyGoUsageLimit(status: number, body: string): UpstreamErrorClassification | null {
@@ -62,9 +83,47 @@ export class OpenCodeGoProvider implements Provider {
   }
 
   getAvailableModels(_accounts: AccountRecord[]): string[] {
+    return this.readCachedModels() ?? [...OPENCODE_GO_MODELS]
+  }
+
+  getDefaultModels(): string[] {
     return [...OPENCODE_GO_MODELS]
   }
 
+  // OpenCode Go proxies a broader upstream catalog (including glm/*) and
+  // forwards the requested model as-is, so any model string is eligible.
+  supportsModel(_model: string): boolean {
+    return true
+  }
+
+  async fetchRemoteModels(account: AccountRecord): Promise<string[] | null> {
+    const credential = await this.getCredential(account)
+    const baseUrl = this.getUpstreamBaseUrl(account)
+    const resp = await apiFetch(`${baseUrl}/models`, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${credential.token}`,
+        accept: "application/json",
+      },
+      signal: AbortSignal.timeout(20_000),
+    })
+    const body = await resp.text()
+    if (!resp.ok) throw new Error(`OpenCode Go /models 拉取失败（HTTP ${resp.status}）: ${body.slice(0, 200)}`)
+    return parseOpenAiModelList(body)
+  }
+
+  private readCachedModels(): string[] | null {
+    try {
+      const row = getDatabase().prepare("SELECT models_json FROM provider_model_cache WHERE pool_type=?").get(this.poolType) as { models_json: string } | undefined
+      if (!row?.models_json) return null
+      const parsed = JSON.parse(row.models_json) as unknown
+      if (!Array.isArray(parsed)) return null
+      const models = parsed.filter((item): item is string => typeof item === "string" && item.length > 0)
+      return models.length ? models : null
+    } catch {
+      return null
+    }
+  }
   resolveModel(_account: AccountRecord, requestedModel: string): string {
     // OpenCode Go does not remap models — the requested model is forwarded as-is.
     return requestedModel

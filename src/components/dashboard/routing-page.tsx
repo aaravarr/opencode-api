@@ -23,16 +23,32 @@ interface AccountsPayload {
 }
 interface ModelRoutingPayload { rules?: ModelRouteRule[] }
 
+interface ProviderModelCatalog {
+  poolType: string;
+  label: string;
+  models: string[];
+  source: string;
+  accountId: string | null;
+  error: string | null;
+  fetchedAt: string | null;
+  updatedAt: string | null;
+  defaultModels: string[];
+  remoteModels: string[] | null;
+}
+interface ProviderModelsPayload { catalogs?: ProviderModelCatalog[] }
+
 const POOL_OPTIONS = ["opencode-go", "openai-cpa", "openai-oauth", "xai-grok"] as const;
 
 export function RoutingPage() {
   const routingResource = useAdminResource<RoutingPayload>("/api/admin/routing");
   const accountsResource = useAdminResource<AccountsPayload>("/api/admin/accounts");
   const modelRoutingResource = useAdminResource<ModelRoutingPayload>("/api/admin/model-routing");
+  const providerModelsResource = useAdminResource<ProviderModelsPayload>("/api/admin/provider-models");
   const { adminFetch } = useAdmin();
   const routing = routingResource.data?.routing ?? routingResource.data;
   const accounts = accountsResource.data?.accounts ?? [];
   const rules = modelRoutingResource.data?.rules ?? [];
+  const catalogs = providerModelsResource.data?.catalogs ?? [];
   // per-pool-type 首选账号：从 routing data 取当前配置与号池类型列表
   const rawPoolTypes = routing?.poolTypes ?? accountsResource.data?.poolTypes ?? Array.from(new Set(accounts.map((a) => a.poolType || "opencode-go"))) ?? [...POOL_OPTIONS];
   // Normalize: accounts API may return poolTypes as objects { type, label, ... }, extract .type
@@ -56,7 +72,12 @@ export function RoutingPage() {
 
   const loading = routingResource.loading || accountsResource.loading;
   const error = routingResource.error || accountsResource.error;
-  const refreshAll = () => { void routingResource.refresh(); void accountsResource.refresh(); void modelRoutingResource.refresh(); };
+  const refreshAll = () => {
+    void routingResource.refresh();
+    void accountsResource.refresh();
+    void modelRoutingResource.refresh();
+    void providerModelsResource.refresh();
+  };
 
   return (
     <>
@@ -104,8 +125,104 @@ export function RoutingPage() {
         </div> : null}
 
         <ModelRoutingSection rules={rules} loading={modelRoutingResource.loading} error={modelRoutingResource.error} adminFetch={adminFetch} onRefresh={() => void modelRoutingResource.refresh()} />
+        <ProviderModelsSection
+          catalogs={catalogs}
+          loading={providerModelsResource.loading}
+          error={providerModelsResource.error}
+          adminFetch={adminFetch}
+          onRefresh={() => void providerModelsResource.refresh()}
+        />
       </div>
     </>
+  );
+}
+
+function ProviderModelsSection({ catalogs, loading, error, adminFetch, onRefresh }: {
+  catalogs: ProviderModelCatalog[];
+  loading: boolean;
+  error: string | null;
+  adminFetch: (path: string, init?: RequestInit) => Promise<Response>;
+  onRefresh: () => void;
+}) {
+  const [refreshing, setRefreshing] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+
+  async function refreshCatalog(poolType?: string) {
+    setRefreshing(poolType ?? "all");
+    setActionError(null);
+    setActionMessage(null);
+    try {
+      const response = await adminFetch("/api/admin/provider-models", {
+        method: "POST",
+        body: JSON.stringify(poolType ? { poolType } : {}),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(payload?.error?.message || payload?.message || "刷新模型列表失败");
+      setActionMessage(poolType ? `${getPoolLabel(poolType)} 模型列表已刷新` : "全部 Provider 模型列表已刷新");
+      onRefresh();
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "刷新模型列表失败");
+    } finally {
+      setRefreshing(null);
+    }
+  }
+
+  return (
+    <Panel
+      title="Provider 模型目录"
+      description="默认使用内置列表；服务启动、账号导入后会尝试拉取上游 /models，也可手动刷新。"
+      action={
+        <Button size="sm" variant="outline" onClick={() => void refreshCatalog()} disabled={Boolean(refreshing)}>
+          <RefreshCw data-icon="inline-start" />
+          {refreshing === "all" ? "刷新中" : "全部刷新"}
+        </Button>
+      }
+    >
+      {actionError ? <div className="mx-4 mt-3 rounded-md border border-destructive/20 bg-destructive/5 px-4 py-2.5 text-xs text-destructive" role="alert">{actionError}</div> : null}
+      {actionMessage ? <div className="mx-4 mt-3 rounded-md border bg-[#fafafa] px-4 py-2.5 text-xs text-muted-foreground" role="status">{actionMessage}</div> : null}
+      {loading ? <LoadingTable rows={4} columns={3} /> : null}
+      {error ? <ErrorState message={error} onRetry={onRefresh} /> : null}
+      {!loading && !error && !catalogs.length ? (
+        <EmptyState title="还没有模型目录" description="导入至少一个 Provider 账号后，可刷新上游模型列表。" />
+      ) : null}
+      {!loading && !error && catalogs.length ? (
+        <div className="divide-y">
+          {catalogs.map((catalog) => (
+            <div key={catalog.poolType} className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-start sm:px-5">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <PoolTypeBadge poolType={catalog.poolType} />
+                  <Badge variant="outline" className="h-5 rounded-sm px-1.5 text-[11px]">{catalog.source}</Badge>
+                  <span className="text-[11px] text-muted-foreground">{catalog.models.length} 个模型</span>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {catalog.models.slice(0, 24).map((model) => (
+                    <code key={model} className="rounded-sm bg-[#f5f5f5] px-1.5 py-0.5 font-mono text-[11px]">{model}</code>
+                  ))}
+                  {catalog.models.length > 24 ? (
+                    <span className="text-[11px] text-muted-foreground">+{catalog.models.length - 24}</span>
+                  ) : null}
+                </div>
+                <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
+                  最近同步：{formatDate(catalog.fetchedAt || catalog.updatedAt)}
+                  {catalog.error ? ` · ${catalog.error}` : ""}
+                </p>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void refreshCatalog(catalog.poolType)}
+                disabled={Boolean(refreshing)}
+              >
+                <RefreshCw data-icon="inline-start" />
+                {refreshing === catalog.poolType ? "刷新中" : "拉取 /models"}
+              </Button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </Panel>
   );
 }
 

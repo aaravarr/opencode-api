@@ -69,7 +69,16 @@ export interface Provider {
   supportedQuotaKinds(): readonly QuotaKind[]
   refreshQuota(accountId: string, account: AccountRecord): Promise<QuotaWindow[]>
   getAvailableModels(accounts: AccountRecord[]): string[]
+  /** Static bootstrap catalog used before a remote /models sync succeeds. */
+  getDefaultModels?(): string[]
   resolveModel(account: AccountRecord, requestedModel: string): string
+  /** Whether this provider can serve the requested model. Defaults to catalog membership when omitted. */
+  supportsModel?(model: string, accounts?: AccountRecord[]): boolean
+  /**
+   * Optional live catalog fetch using a ready account credential.
+   * Return null when this provider cannot list models remotely.
+   */
+  fetchRemoteModels?(account: AccountRecord): Promise<string[] | null>
   getCredential(account: AccountRecord): Promise<ProviderCredential>
   validateCredential(account: AccountRecord): Promise<{ valid: boolean; email?: string; planType?: string; extra?: Record<string, unknown> }>
   getUpstreamBaseUrl(account: AccountRecord): string
