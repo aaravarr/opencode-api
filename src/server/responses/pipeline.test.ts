@@ -30,20 +30,31 @@ describe("responses tool-schema", () => {
 })
 
 describe("responses pipeline", () => {
-  it("prepareResponsesRequestBody injects server tools and normalizes", async () => {
+  it("prepareResponsesRequestBody injects server tools only for paid accounts", async () => {
     const db = createDatabase(":memory:")
-    const prepared = await prepareResponsesRequestBody({
+    const freePrepared = await prepareResponsesRequestBody({
       model: "grok-4.5",
       input: "Search recent posts about Elon Musk",
       tools: [{ type: "function", function: { name: "noop", parameters: { type: "object", properties: {} } } }],
       tool_choice: "required",
-    }, { db })
-    const tools = (prepared.body as any).tools as Array<{ type: string; name?: string }>
-    expect(prepared.route).toBe("responses")
-    expect(tools.some((t) => t.type === "web_search")).toBe(true)
-    expect(tools.some((t) => t.type === "x_search")).toBe(true)
-    expect(tools.some((t) => t.type === "function" && t.name === "noop")).toBe(true)
-    expect(prepared.meta.injectedTools).toBe(true)
+    }, { db, paidAccount: false })
+    const freeTools = (freePrepared.body as any).tools as Array<{ type: string; name?: string }>
+    expect(freePrepared.route).toBe("responses")
+    expect(freeTools.some((t) => t.type === "web_search")).toBe(false)
+    expect(freeTools.some((t) => t.type === "x_search")).toBe(false)
+    expect(freePrepared.meta.injectedTools).toBe(false)
+
+    const paidPrepared = await prepareResponsesRequestBody({
+      model: "grok-4.5",
+      input: "Search recent posts about Elon Musk",
+      tools: [{ type: "function", function: { name: "noop", parameters: { type: "object", properties: {} } } }],
+      tool_choice: "required",
+    }, { db, paidAccount: true })
+    const paidTools = (paidPrepared.body as any).tools as Array<{ type: string; name?: string }>
+    expect(paidTools.some((t) => t.type === "web_search")).toBe(true)
+    expect(paidTools.some((t) => t.type === "x_search")).toBe(true)
+    expect(paidTools.some((t) => t.type === "function" && t.name === "noop")).toBe(true)
+    expect(paidPrepared.meta.injectedTools).toBe(true)
   })
 
   it("sanitizes custom_tool_call into function_call", async () => {
@@ -83,13 +94,24 @@ describe("responses pipeline", () => {
     expect(prepared.routeReason).toMatch(/foreign_opaque/)
   })
 
-  it("keeps responses route for Grok even with foreign previous_response_id so x_search can work", async () => {
+  it("free Grok with foreign previous_response_id eagers to chat when no server tools present", async () => {
+    const db = createDatabase(":memory:")
+    const prepared = await prepareResponsesRequestBody({
+      model: "grok-4.5",
+      previous_response_id: "resp_missing_123",
+      input: "continue",
+    }, { db, paidAccount: false })
+    expect(prepared.route).toBe("chat")
+    expect(prepared.routeReason).toContain("foreign_previous_response_id")
+  })
+
+  it("paid Grok injects server tools and stays on responses despite foreign previous_response_id", async () => {
     const db = createDatabase(":memory:")
     const prepared = await prepareResponsesRequestBody({
       model: "grok-4.5",
       previous_response_id: "resp_missing_123",
       input: "Use x_search to find recent posts about Elon Musk",
-    }, { db })
+    }, { db, paidAccount: true })
     expect(prepared.route).toBe("responses")
     expect(prepared.routeReason).toBe("prefer_responses_server_tools")
     const tools = (prepared.body as any).tools as Array<{ type: string }>
@@ -97,7 +119,7 @@ describe("responses pipeline", () => {
     expect(tools.some((t) => t.type === "web_search")).toBe(true)
   })
 
-  it("keeps responses route when server tools preferred even on chat lineage", async () => {
+  it("keeps responses route when paid account injects server tools even on chat lineage", async () => {
     const db = createDatabase(":memory:")
     await rememberConversationTurn({
       responseId: "resp_known",
@@ -110,7 +132,7 @@ describe("responses pipeline", () => {
       model: "grok-4.5",
       client_metadata: { thread_id: "t1" },
       input: "search again",
-    }, { db })
+    }, { db, paidAccount: true })
     expect(prepared.route).toBe("responses")
     expect(prepared.routeReason).toBe("prefer_responses_server_tools")
   })

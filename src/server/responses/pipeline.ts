@@ -94,6 +94,8 @@ export async function prepareResponsesRequestBody(
   body: unknown,
   opts?: {
     injectServerTools?: boolean
+    /** Paid xAI seats may receive default web_search/x_search; free seats never auto-inject. */
+    paidAccount?: boolean
     isCompact?: boolean
     db?: AppDatabase
   },
@@ -101,12 +103,13 @@ export async function prepareResponsesRequestBody(
   const db = opts?.db ?? getDatabase()
   const model = isObj(body) && typeof body.model === "string" ? body.model : ""
   const looksXaiModel = /grok/i.test(model)
+  // Free Grok accounts cannot execute server tools reliably; only paid seats auto-inject.
   const injectEnabled =
     opts?.injectServerTools === true
       ? true
       : opts?.injectServerTools === false
         ? false
-        : looksXaiModel
+        : Boolean(opts?.paidAccount && looksXaiModel)
   const isCompact = opts?.isCompact === true
 
   const continuityKeys = extractContinuityKeysFromRequest(body)

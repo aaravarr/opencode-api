@@ -40,8 +40,14 @@ function readUsageObject(usage: Record<string, unknown>): TokenUsage | undefined
     ?? num(usage.cache_read_input_tokens)
     ?? num((usage.prompt_tokens_details as Record<string, unknown> | undefined)?.cached_tokens)
     ?? num((usage.input_tokens_details as Record<string, unknown> | undefined)?.cached_tokens);
-  const reasoningTokens = num(usage.reasoning_tokens) ?? num((usage.completion_tokens_details as Record<string, unknown> | undefined)?.reasoning_tokens);
-  const textTokens = num(usage.text_tokens) ?? num((usage.completion_tokens_details as Record<string, unknown> | undefined)?.text_tokens);
+  const reasoningTokens =
+    num(usage.reasoning_tokens)
+    ?? num((usage.completion_tokens_details as Record<string, unknown> | undefined)?.reasoning_tokens)
+    ?? num((usage.output_tokens_details as Record<string, unknown> | undefined)?.reasoning_tokens);
+  const textTokens =
+    num(usage.text_tokens)
+    ?? num((usage.completion_tokens_details as Record<string, unknown> | undefined)?.text_tokens)
+    ?? num((usage.output_tokens_details as Record<string, unknown> | undefined)?.text_tokens);
   const imageTokens = num(usage.image_tokens);
   const audioTokens = num(usage.audio_tokens);
   const computed = totalTokens ?? (promptTokens !== undefined && completionTokens !== undefined ? promptTokens + completionTokens : undefined);
@@ -62,10 +68,20 @@ function readUsageObject(usage: Record<string, unknown>): TokenUsage | undefined
 export function extractUsage(payload: unknown): TokenUsage | undefined {
   if (!payload || typeof payload !== "object") return undefined;
   const root = payload as Record<string, unknown>;
-  const usageRaw = root.usage ?? (root.message as Record<string, unknown> | undefined)?.usage;
-  if (usageRaw && typeof usageRaw === "object") {
-    const parsed = readUsageObject(usageRaw as Record<string, unknown>);
-    if (parsed) return parsed;
+  // Responses API (esp. SSE events like response.completed) nests usage under response.usage.
+  const response = root.response && typeof root.response === "object" ? root.response as Record<string, unknown> : undefined;
+  const nestedResponse = response?.response && typeof response.response === "object" ? response.response as Record<string, unknown> : undefined;
+  const candidates: unknown[] = [
+    root.usage,
+    (root.message as Record<string, unknown> | undefined)?.usage,
+    response?.usage,
+    nestedResponse?.usage,
+  ];
+  for (const usageRaw of candidates) {
+    if (usageRaw && typeof usageRaw === "object") {
+      const parsed = readUsageObject(usageRaw as Record<string, unknown>);
+      if (parsed) return parsed;
+    }
   }
   return undefined;
 }
@@ -156,6 +172,8 @@ export function teeAndCapture(
   let total = 0;
   let firstByteAt: number | undefined;
   let truncated = false;
+  let usage: TokenUsage | undefined;
+  let sseLineBuf = "";
   (async () => {
     const reader = side.getReader();
     try {
@@ -163,12 +181,44 @@ export function teeAndCapture(
         const result = await reader.read();
         if (result.done) break;
         if (firstByteAt === undefined) firstByteAt = Date.now();
-        if (total < MAX_CAPTURE_BYTES) {
-          chunks.push(result.value);
-          total += result.value.byteLength;
+        const chunk = result.value;
+        total += chunk.byteLength;
+        // Always scan SSE lines for usage even after body capture is truncated.
+        sseLineBuf += decoder.decode(chunk, { stream: true });
+        let nl: number;
+        while ((nl = sseLineBuf.indexOf("\n")) >= 0) {
+          const line = sseLineBuf.slice(0, nl).replace(/\r$/, "");
+          sseLineBuf = sseLineBuf.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trimStart();
+          if (!data || data === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(data) as unknown;
+            const nextUsage = extractUsage(parsed);
+            if (nextUsage) usage = nextUsage;
+          } catch {
+            // ignore malformed sse data lines
+          }
+        }
+        if (!truncated && total <= MAX_CAPTURE_BYTES) {
+          chunks.push(chunk);
           if (total > MAX_CAPTURE_BYTES) truncated = true;
-        } else {
+        } else if (!truncated) {
           truncated = true;
+        }
+      }
+      // flush decoder remainder
+      sseLineBuf += decoder.decode();
+      if (sseLineBuf.trim()) {
+        for (const raw of sseLineBuf.split(/\r?\n/)) {
+          if (!raw.startsWith("data:")) continue;
+          const data = raw.slice(5).trimStart();
+          if (!data || data === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(data) as unknown;
+            const nextUsage = extractUsage(parsed);
+            if (nextUsage) usage = nextUsage;
+          } catch { /* ignore */ }
         }
       }
     } catch {
@@ -176,8 +226,8 @@ export function teeAndCapture(
     } finally {
       try { reader.releaseLock() } catch { /* noop */ }
     }
-    const text = decoder.decode(chunks.length ? concatBytes(chunks) : new Uint8Array(), { stream: false });
-    let usage = extractUsageFromSse(text);
+    const text = new TextDecoder().decode(chunks.length ? concatBytes(chunks) : new Uint8Array(), { stream: false });
+    if (!usage) usage = extractUsageFromSse(text);
     let response: unknown;
     if (!usage) {
       try { response = JSON.parse(text); usage = extractUsage(response) } catch { /* keep text */ }

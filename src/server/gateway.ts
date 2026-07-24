@@ -12,6 +12,8 @@ import { captureJsonResponse, ensureStreamUsage, extractBodyError, extractUsage,
 import { convertChatJsonToResponses, convertChatStreamToResponses, prepareChatRequestBody, prepareResponsesRequestBody, remapResponsesSuccessBody, remapResponsesSuccessStream, rememberResponsesTurn, type PrepareResponsesResult } from "./responses/pipeline"
 import type { CodexToolContext } from "./responses/codex-chat-compat"
 import { tryGetProvider, getProviderRegistry, type UpstreamErrorClassification } from "./providers"
+import { isXaiPaidAccount } from "./providers/xai-grok"
+import { injectDefaultServerTools, normalizeToolsInBody } from "./responses/tool-schema"
 import { resolveMirrorUrl } from "./api-fetch"
 import { upsertLocalRollingUsage } from "./quota-usage"
 
@@ -293,7 +295,9 @@ export class GatewayService {
     if (requestBodyJson && typeof requestBodyJson === "object") {
       if (processResponses) {
         const prepared = await prepareResponsesRequestBody(requestBodyJson, {
-          injectServerTools: undefined,
+          // Account-tier-aware inject happens after routing selects a seat.
+          injectServerTools: false,
+          paidAccount: false,
           isCompact: false,
           db: this.db,
         })
@@ -393,6 +397,32 @@ export class GatewayService {
             credential = { token: legacy.goApiKey, credentialVersion: legacy.credentialVersion }
           }
           const upstreamModel = provider.resolveModel(selection.account, model ?? "")
+          // Free xAI seats never auto-inject server tools; paid seats get web_search/x_search.
+          if (
+            processResponses
+            && responsesRoute === "responses"
+            && selection.account.poolType === "xai-grok"
+            && isXaiPaidAccount(selection.account.id)
+            && upstreamBytes
+          ) {
+            try {
+              const current = JSON.parse(new TextDecoder().decode(upstreamBytes)) as unknown
+              const injected = injectDefaultServerTools(current, { enabled: true, tools: ["web_search", "x_search"] })
+              const normalized = normalizeToolsInBody(injected, { mode: "responses" })
+              const beforeCount = current && typeof current === "object" && Array.isArray((current as any).tools) ? (current as any).tools.length : 0
+              const afterCount = normalized && typeof normalized === "object" && Array.isArray((normalized as any).tools) ? (normalized as any).tools.length : 0
+              if (afterCount > beforeCount) {
+                upstreamBytes = new TextEncoder().encode(JSON.stringify(normalized))
+                requestBodyJson = normalized
+                if (responsesProcessMeta) responsesProcessMeta.injectedTools = true
+                const parts = String(routeMeta.transformSummary || "").split(" | ").filter(Boolean)
+                if (!parts.some((p) => p.startsWith("inject:"))) parts.splice(1, 0, "inject:web_search+x_search")
+                routeMeta.transformSummary = parts.join(" | ")
+                this.db.prepare("UPDATE gateway_requests SET transform_summary=?, process_mode=process_mode WHERE id=?")
+                  .run(routeMeta.transformSummary, requestId)
+              }
+            } catch { /* keep original body */ }
+          }
           const target = provider.buildForwardTarget({
             method: request.method, endpoint: effectiveEndpoint, model: model ?? "", upstreamModel,
             body: upstreamBytes, headers: request.headers,
@@ -469,53 +499,44 @@ export class GatewayService {
           const rebuilt = prependChunk(first.bytes, reader)
           const firstTokenAt = Date.now()
           const status = upstream.status
-          if (logging) {
-            const onComplete = (r: CaptureResult) => {
-              const latencyMs = Date.now() - t0
-              const firstTokenMs = firstTokenAt - upstreamStartedAt
-              this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, r.error ?? null, selection.account.name)
-              this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: isLogOk(status, r.error) ? 1 : 0, latencyMs, localPrepMs: upstreamStartedAt - t0, firstTokenMs, usage: r.usage, error: r.error, accountId: selection.account.id, accountName: selection.account.name, responseSizeBytes: r.responseBytes ?? null, logSettings, requestBodyJson, responseBody: r.response, responseTruncated: r.responseTruncated, meta, ...routeMeta })
-            }
-            let outStream: ReadableStream<Uint8Array> = teeAndCapture(rebuilt, (r) => {
-              onComplete(r)
-              if (processResponses && responsesProcessMeta) {
-                void rememberResponsesTurn({
-                  responsePayload: r.response,
-                  continuityKeys: responsesProcessMeta.continuityKeys,
-                  userMessages: responsesProcessMeta.userMessages,
-                  preferredMode: chatFallbackUsed ? "chat" : "responses",
-                  db: this.db,
-                })
-              }
+          // Always capture usage for dashboard stats, even when body logging is off.
+          const onComplete = (r: CaptureResult) => {
+            const latencyMs = Date.now() - t0
+            const firstTokenMs = firstTokenAt - upstreamStartedAt
+            this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, r.error ?? null, selection.account.name)
+            this.finalizeRequest(requestId, {
+              status,
+              outcome: "SUCCESS",
+              attempts: attemptNumber,
+              ok: isLogOk(status, r.error) ? 1 : 0,
+              latencyMs,
+              localPrepMs: upstreamStartedAt - t0,
+              firstTokenMs,
+              usage: r.usage,
+              error: r.error,
+              accountId: selection.account.id,
+              accountName: selection.account.name,
+              responseSizeBytes: r.responseBytes ?? null,
+              logSettings,
+              requestBodyJson,
+              responseBody: logging ? r.response : undefined,
+              responseTruncated: r.responseTruncated,
+              meta,
+              ...routeMeta,
             })
-            if (chatFallbackUsed) outStream = convertChatStreamToResponses(outStream, responsesModelHint, responsesToolContext)
-            else if (processResponses && responsesToolContext) outStream = remapResponsesSuccessStream(outStream, responsesToolContext)
-            const headers = responseHeaders(upstream.headers)
-            if (processResponses) {
-              headers.set("x-responses-route", responsesRoute)
-              if (responsesRouteReason) headers.set("x-responses-route-reason", responsesRouteReason)
+            if (processResponses && responsesProcessMeta) {
+              void rememberResponsesTurn({
+                responsePayload: r.response,
+                continuityKeys: responsesProcessMeta.continuityKeys,
+                userMessages: responsesProcessMeta.userMessages,
+                preferredMode: chatFallbackUsed ? "chat" : "responses",
+                db: this.db,
+              })
             }
-            if (chatFallbackUsed) {
-              headers.set("x-grok-fallback", "chat_completions")
-              headers.set("x-grok-fallback-from", "/v1/responses")
-              headers.set("x-grok-fallback-to", "/v1/chat/completions")
-              if (responsesRouteReason) headers.set("x-grok-fallback-reason", responsesRouteReason)
-            }
-            return new Response(outStream, { status, headers })
           }
-          this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, null, selection.account.name)
-          this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: 1, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta, ...routeMeta })
-          let outStream: ReadableStream<Uint8Array> = rebuilt
+          let outStream: ReadableStream<Uint8Array> = teeAndCapture(rebuilt, onComplete)
           if (chatFallbackUsed) outStream = convertChatStreamToResponses(outStream, responsesModelHint, responsesToolContext)
           else if (processResponses && responsesToolContext) outStream = remapResponsesSuccessStream(outStream, responsesToolContext)
-          if (processResponses && responsesProcessMeta) {
-            void rememberResponsesTurn({
-              continuityKeys: responsesProcessMeta.continuityKeys,
-              userMessages: responsesProcessMeta.userMessages,
-              preferredMode: chatFallbackUsed ? "chat" : "responses",
-              db: this.db,
-            })
-          }
           const headers = responseHeaders(upstream.headers)
           if (processResponses) {
             headers.set("x-responses-route", responsesRoute)
@@ -581,24 +602,52 @@ export class GatewayService {
             if (responsesRouteReason) headers.set("x-grok-fallback-reason", responsesRouteReason)
           }
 
-          if (logging) {
-            const onComplete = (r: CaptureResult) => {
-              const latencyMs = Date.now() - t0
-              this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, r.error ?? null, selection.account.name)
-              this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: isLogOk(status, r.error) ? 1 : 0, latencyMs, localPrepMs: upstreamStartedAt - t0, usage: r.usage, error: r.error, accountId: selection.account.id, accountName: selection.account.name, responseSizeBytes: r.responseBytes ?? outBytes.byteLength, logSettings, requestBodyJson, responseBody: r.response ?? remappedJson, responseTruncated: r.responseTruncated, meta, ...routeMeta })
-            }
-            return new Response(captureJsonResponse(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(outBytes); controller.close() } }), onComplete), { status, headers })
-          }
+          const usage = extractUsage(remappedJson)
           this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, null, selection.account.name)
-          this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: 1, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta, ...routeMeta })
+          this.finalizeRequest(requestId, {
+            status,
+            outcome: "SUCCESS",
+            attempts: attemptNumber,
+            ok: 1,
+            latencyMs: Date.now() - t0,
+            localPrepMs: upstreamStartedAt - t0,
+            usage,
+            accountId: selection.account.id,
+            accountName: selection.account.name,
+            responseSizeBytes: outBytes.byteLength,
+            logSettings,
+            requestBodyJson,
+            responseBody: logging ? remappedJson : undefined,
+            responseTruncated: false,
+            meta,
+            ...routeMeta,
+          })
           return new Response(outBytes, { status, headers })
         }
 
-        if (logging && upstream.body) {
+        if (upstream.body) {
           const onComplete = (r: CaptureResult) => {
             const latencyMs = Date.now() - t0
             this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, r.error ?? null, selection.account.name)
-            this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: isLogOk(status, r.error) ? 1 : 0, latencyMs, localPrepMs: upstreamStartedAt - t0, usage: r.usage, error: r.error, accountId: selection.account.id, accountName: selection.account.name, responseSizeBytes: r.responseBytes ?? null, logSettings, requestBodyJson, responseBody: r.response, responseTruncated: r.responseTruncated, meta, ...routeMeta })
+            this.finalizeRequest(requestId, {
+              status,
+              outcome: "SUCCESS",
+              attempts: attemptNumber,
+              ok: isLogOk(status, r.error) ? 1 : 0,
+              latencyMs,
+              localPrepMs: upstreamStartedAt - t0,
+              usage: r.usage,
+              error: r.error,
+              accountId: selection.account.id,
+              accountName: selection.account.name,
+              responseSizeBytes: r.responseBytes ?? null,
+              logSettings,
+              requestBodyJson,
+              responseBody: logging ? r.response : undefined,
+              responseTruncated: r.responseTruncated,
+              meta,
+              ...routeMeta,
+            })
           }
           return new Response(captureJsonResponse(upstream.body, onComplete), { status, headers: responseHeaders(upstream.headers) })
         }

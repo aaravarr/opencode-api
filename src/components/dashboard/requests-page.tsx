@@ -19,16 +19,30 @@ const pageSize = 20;
 interface AccountsResponse { items?: { id: string; poolType?: string }[]; accounts?: { id: string; poolType?: string }[] }
 
 
+function normalizeEndpointLabel(value?: string | null): string {
+  if (!value) return "—"
+  const v = value.replace(/^\/?v1\//, "").replace(/^raw\/v1\//, "raw/")
+  if (v.includes("chat/completions")) return "chat"
+  if (v.includes("responses")) return value.startsWith("raw/") || value.includes("raw/v1/") ? "raw/responses" : "responses"
+  if (v.includes("messages")) return "messages"
+  return v
+}
+
 function formatRouteLabel(request: RequestRecord): string {
-  const inbound = request.inboundEndpoint || (request.endpoint ? `v1/${request.endpoint}` : "—")
-  const upstream = request.upstreamEndpoint || request.endpoint || "—"
-  if (request.converted || (inbound.includes("responses") && String(upstream).includes("chat/completions"))) {
-    return `${inbound} → ${upstream}`
-  }
-  if (inbound !== `v1/${upstream}` && inbound !== upstream) {
-    return `${inbound} · ${upstream}`
-  }
+  const inbound = normalizeEndpointLabel(request.inboundEndpoint || (request.endpoint ? `v1/${request.endpoint}` : null))
+  const upstream = normalizeEndpointLabel(request.upstreamEndpoint || request.endpoint)
+  if (request.converted || (inbound === "responses" && upstream === "chat")) return `${inbound} → ${upstream}`
+  if (inbound !== upstream && upstream !== "—") return `${inbound} → ${upstream}`
   return inbound
+}
+
+function routeBadgeClass(request: RequestRecord): string {
+  const label = formatRouteLabel(request)
+  if (label.includes("→")) return "border-amber-200 bg-amber-50 text-amber-800"
+  if (label.includes("raw")) return "border-slate-200 bg-slate-50 text-slate-700"
+  if (label === "chat") return "border-sky-200 bg-sky-50 text-sky-800"
+  if (label === "responses") return "border-emerald-200 bg-emerald-50 text-emerald-800"
+  return "border-border bg-[#fafafa] text-muted-foreground"
 }
 
 function formatTransformLabel(request: RequestRecord): string {
@@ -38,6 +52,10 @@ function formatTransformLabel(request: RequestRecord): string {
   if (request.routeMode === "responses") return request.routeReason || "responses-native"
   if (request.routeMode === "chat") return request.routeReason || "chat"
   return request.processMode || "—"
+}
+
+function hasInjectedServerTools(request: RequestRecord): boolean {
+  return String(request.transformSummary || "").includes("inject:web_search+x_search")
 }
 
 export function RequestsPage() {
@@ -164,14 +182,15 @@ export function RequestsPage() {
                 <TableRow key={request.id}>
                   <TableCell className="px-4 font-mono text-xs text-muted-foreground">{formatDate(request.createdAt)}</TableCell>
                   <TableCell className="font-medium text-sm">{request.model || "未知"}</TableCell>
-                  <TableCell className="max-w-[220px] truncate font-mono text-[11px] text-muted-foreground" title={formatRouteLabel(request)}>
-                    {formatRouteLabel(request)}
-                  </TableCell>
-                  <TableCell className="max-w-[240px] truncate font-mono text-[11px]" title={formatTransformLabel(request)}>
-                    <span className={request.converted ? "text-amber-700" : "text-muted-foreground"}>
-                      {request.converted ? "已转换" : (request.processMode === "raw" ? "原生" : "处理")}
-                      {request.routeReason ? ` · ${request.routeReason}` : ""}
+                  <TableCell className="max-w-[220px]" title={formatTransformLabel(request)}>
+                    <span className={`inline-flex max-w-full items-center truncate rounded-md border px-1.5 py-0.5 font-mono text-[11px] font-medium ${routeBadgeClass(request)}`}>
+                      {formatRouteLabel(request)}
                     </span>
+                  </TableCell>
+                  <TableCell className="max-w-[260px] truncate font-mono text-[11px] text-muted-foreground" title={formatTransformLabel(request)}>
+                    {request.converted ? "已转换" : (request.processMode === "raw" ? "原生透传" : "处理后")}
+                    {hasInjectedServerTools(request) ? " · 注入工具" : ""}
+                    {request.routeReason ? ` · ${request.routeReason}` : ""}
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">{request.apiKeyName || request.apiKeyPrefix || "未记录"}</TableCell>
                   <TableCell>
@@ -272,6 +291,7 @@ function RequestDetailSheet({ request, onOpenChange, poolType }: { request: Requ
                 <ErrorState message={error} />
               ) : detail ? (
                 <div className="space-y-6">
+                  <RouteTransformPanel request={detail.request} />
                   <BasicInfo request={detail.request} poolType={poolType} />
                   <TokenBreakdown request={detail.request} />
                   <FailoverTimeline attempts={detail.attempts} />
@@ -296,15 +316,47 @@ function RequestDetailSheet({ request, onOpenChange, poolType }: { request: Requ
   );
 }
 
+function RouteTransformPanel({ request }: { request: RequestDetail["request"] }) {
+  const route = formatRouteLabel(request)
+  const injected = hasInjectedServerTools(request)
+  return (
+    <div className="rounded-md border bg-[#fafafa] p-3">
+      <h3 className="mb-3 text-sm font-medium">路由与转换</h3>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={`inline-flex items-center rounded-md border px-2 py-1 font-mono text-xs font-medium ${routeBadgeClass(request)}`}>
+          {route}
+        </span>
+        <span className={`inline-flex items-center rounded-md border px-2 py-1 text-xs ${request.converted ? "border-amber-200 bg-amber-50 text-amber-800" : "border-border bg-white text-muted-foreground"}`}>
+          {request.converted ? "发生转换" : "未转换"}
+        </span>
+        <span className={`inline-flex items-center rounded-md border px-2 py-1 text-xs ${injected ? "border-violet-200 bg-violet-50 text-violet-800" : "border-border bg-white text-muted-foreground"}`}>
+          {injected ? "已注入 web_search + x_search" : "未注入内置工具"}
+        </span>
+        <span className="inline-flex items-center rounded-md border border-border bg-white px-2 py-1 font-mono text-xs text-muted-foreground">
+          model: {request.model || "—"}
+        </span>
+      </div>
+      {request.routeReason ? (
+        <p className="mt-2 font-mono text-[11px] text-muted-foreground">原因：{request.routeReason}</p>
+      ) : null}
+      {request.transformSummary ? (
+        <p className="mt-1 break-all font-mono text-[11px] text-muted-foreground">摘要：{request.transformSummary}</p>
+      ) : null}
+    </div>
+  )
+}
+
 function BasicInfo({ request, poolType }: { request: RequestDetail["request"]; poolType?: string }) {
   const rows: Array<[string, string]> = [
     ["密钥", request.apiKeyName || request.apiKeyPrefix || "—"],
     ["__account__", request.accountName || "—"],
+    ["模型", request.model || "—"],
+    ["路由路径", formatRouteLabel(request)],
     ["客户端端点", request.inboundEndpoint || (request.endpoint ? `v1/${request.endpoint}` : "—")],
     ["实际上游", request.upstreamEndpoint || request.endpoint || "—"],
-    ["处理模式", request.processMode || "—"],
-    ["路由模式", request.routeMode || "—"],
-    ["是否转换", request.converted ? "是" : "否"],
+    ["处理模式", request.processMode === "raw" ? "原生透传" : request.processMode === "processed" ? "处理后" : (request.processMode || "—")],
+    ["是否转换", request.converted ? "是（responses → chat）" : "否"],
+    ["注入工具", hasInjectedServerTools(request) ? "是（web_search + x_search）" : "否"],
     ["转换原因", request.routeReason || "—"],
     ["转换摘要", request.transformSummary || "—"],
     ["Stream", request.stream ? "是" : "否"],

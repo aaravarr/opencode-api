@@ -61,6 +61,32 @@ export function isXaiAccountBannedResponse(status: number, body: string): boolea
   return ACCOUNT_DENIED_MARKERS.some((marker) => normalized.includes(marker))
 }
 
+/** Free OAuth seats should not get server tools; paid/super seats may. */
+export function isXaiPaidCredentialData(data: ProviderAccountData | null | undefined): boolean {
+  const blob = [data?.subscriptionTier, data?.planType, data?.entitlementStatus]
+    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    .join(" ")
+    .toLowerCase()
+  if (!blob) return false
+  if (/(^|[^a-z])free([^a-z]|$)|trial|inactive|none|unpaid/.test(blob)) return false
+  return /(super|premium|pro|plus|paid|enterprise|team|business|grok\s*pro)/.test(blob)
+}
+
+export function isXaiPaidAccount(accountId: string): boolean {
+  try {
+    const db = getDatabase()
+    const row = db
+      .prepare("SELECT credential_data_ciphertext FROM provider_credentials WHERE account_id = ?")
+      .get(accountId) as { credential_data_ciphertext: string } | undefined
+    if (!row?.credential_data_ciphertext) return false
+    const vault = new SecretVault()
+    const data = JSON.parse(vault.decrypt(row.credential_data_ciphertext)) as ProviderAccountData
+    return isXaiPaidCredentialData(data)
+  } catch {
+    return false
+  }
+}
+
 export async function exchangeXaiRefreshToken(refreshToken: string, clientId = XAI_DEFAULT_CLIENT_ID): Promise<{
   accessToken: string
   refreshToken: string

@@ -125,3 +125,27 @@ describe("capture.MAX_CAPTURE_BYTES", () => {
     expect(MAX_CAPTURE_BYTES).toBe(1_048_576)
   })
 })
+
+
+describe("capture.extractUsage responses nested", () => {
+  it("读取 response.completed 嵌套 usage", () => {
+    expect(extractUsage({
+      type: "response.completed",
+      response: {
+        usage: {
+          input_tokens: 209,
+          output_tokens: 409,
+          total_tokens: 618,
+          output_tokens_details: { reasoning_tokens: 370 },
+          input_tokens_details: { cached_tokens: 128 },
+        },
+      },
+    })).toMatchObject({
+      promptTokens: 209,
+      completionTokens: 409,
+      totalTokens: 618,
+      reasoningTokens: 370,
+      cachedTokens: 128,
+    })
+  })
+})

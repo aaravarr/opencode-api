@@ -250,12 +250,12 @@ describe("gateway logging", () => {
     expect(row.completion_tokens).toBe(8)
     expect(row.total_tokens).toBe(20)
   })
-  it("processed responses injects default server tools", async () => {
+  it("processed free xAI responses do not inject server tools", async () => {
     const { db, apiKey, credentials, hasher } = setup("xai-grok")
     let sent: any = null
     const fetcher = vi.fn().mockImplementation(async (_url, init) => {
       sent = JSON.parse(new TextDecoder().decode(init.body as Uint8Array))
-      return Response.json({ id: "ok", output: [] })
+      return Response.json({ id: "ok", output: [], usage: { input_tokens: 11, output_tokens: 7, total_tokens: 18 } })
     })
     const req = new Request("http://localhost/v1/responses", {
       method: "POST",
@@ -264,14 +264,18 @@ describe("gateway logging", () => {
     })
     const response = await new GatewayService(credentials, db, fetcher, hasher).handle(req, "responses")
     expect(response.status).toBe(200)
-    expect(sent.tools).toEqual(expect.arrayContaining([{ type: "web_search" }, { type: "x_search" }]))
-    const row = db.prepare("SELECT inbound_endpoint,upstream_endpoint,process_mode,route_mode,route_reason,converted,transform_summary FROM gateway_requests ORDER BY started_at DESC LIMIT 1").get() as any
+    expect(sent.tools).toBeUndefined()
+    const row = db.prepare("SELECT inbound_endpoint,upstream_endpoint,process_mode,route_mode,converted,transform_summary,prompt_tokens,completion_tokens,total_tokens FROM gateway_requests ORDER BY started_at DESC LIMIT 1").get() as any
     expect(row.inbound_endpoint).toBe("v1/responses")
     expect(row.upstream_endpoint).toBe("responses")
     expect(row.process_mode).toBe("processed")
     expect(row.route_mode).toBe("responses")
     expect(row.converted).toBe(0)
     expect(String(row.transform_summary || "")).toContain("responses-native")
+    expect(String(row.transform_summary || "")).not.toContain("inject:web_search+x_search")
+    expect(row.prompt_tokens).toBe(11)
+    expect(row.completion_tokens).toBe(7)
+    expect(row.total_tokens).toBe(18)
   })
 
   it("raw responses does not inject default server tools", async () => {
@@ -296,14 +300,18 @@ describe("gateway logging", () => {
     expect(row.converted).toBe(0)
     expect(String(row.transform_summary || "")).toContain("raw")
   })
-  it("Grok responses stay on native path with injected server tools even if previous_response_id is foreign", async () => {
+  it("free Grok without client server tools may chat-fallback on foreign previous_response_id", async () => {
     const { db, apiKey, credentials, hasher } = setup("xai-grok")
     let sentUrl = ""
-    let sent: any = null
     const fetcher = vi.fn().mockImplementation(async (url, init) => {
       sentUrl = String(url)
-      sent = JSON.parse(new TextDecoder().decode(init.body as Uint8Array))
-      return Response.json({ id: "resp_ok", object: "response", output: [], tools: sent.tools || [] })
+      return Response.json({
+        id: "chatcmpl_1",
+        object: "chat.completion",
+        model: "grok-4.5",
+        choices: [{ index: 0, message: { role: "assistant", content: "fallback-ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+      })
     })
     const req = new Request("http://localhost/v1/responses", {
       method: "POST",
@@ -311,15 +319,13 @@ describe("gateway logging", () => {
       body: JSON.stringify({
         model: "grok-4.5",
         previous_response_id: "resp_unknown_xyz",
-        input: "Use x_search to find recent posts about Elon Musk",
+        input: "continue please",
       }),
     })
     const response = await new GatewayService(credentials, db, fetcher, hasher).handle(req, "responses")
     expect(response.status).toBe(200)
-    expect(sentUrl).toContain("/responses")
-    expect(sent.tools).toEqual(expect.arrayContaining([{ type: "web_search" }, { type: "x_search" }]))
-    expect(response.headers.get("x-responses-route")).toBe("responses")
-    expect(response.headers.get("x-responses-route-reason")).toBe("prefer_responses_server_tools")
-    expect(response.headers.get("x-grok-fallback")).toBeNull()
+    expect(sentUrl).toContain("/chat/completions")
+    expect(response.headers.get("x-responses-route")).toBe("chat")
+    expect(response.headers.get("x-grok-fallback")).toBe("chat_completions")
   })
 })
