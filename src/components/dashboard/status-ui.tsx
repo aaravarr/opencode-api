@@ -170,41 +170,57 @@ export function QuotaStatus({
   variant?: "compact" | "card";
 }) {
   const state = quota?.status || "unknown";
-  const used = quota?.usagePercent == null ? null : Math.max(0, Math.min(100, Number(quota.usagePercent)));
-  const remaining = used == null ? null : Math.max(0, 100 - used);
+  // Keep real over-limit percentages (can exceed 100%) so free-tier overspend is visible.
+  const used = quota?.usagePercent == null ? null : Math.round(Math.max(0, Number(quota.usagePercent)) * 100) / 100;
+  const remaining = used == null ? null : Math.round((100 - used) * 100) / 100;
+  const usedTokens = quota?.limitValue != null && quota?.remainingValue != null
+    ? Number(quota.limitValue) - Number(quota.remainingValue)
+    : null;
+  const limitTokens = quota?.limitValue == null ? null : Number(quota.limitValue);
   const reset = quota?.resetInSec != null
     ? formatDuration(quota.resetInSec)
     : quota?.resetAt
       ? formatDate(quota.resetAt)
       : null;
-  const stateLabel = state === "available" ? "可用" : state === "blocked" ? "已耗尽" : "待观测";
+  const overLimit = used != null && used > 100;
+  const stateLabel = overLimit || state === "blocked" || (used != null && used >= 100)
+    ? (overLimit ? "已超限" : "已耗尽")
+    : state === "available"
+      ? "可用"
+      : "待观测";
   const resetLabel = state === "blocked" ? "预计恢复" : "下次重置";
 
   if (variant === "card") {
-    const primary = remaining != null ? String(remaining) : state === "blocked" ? "0" : "—";
+    const primary = used != null ? used.toFixed(2) : state === "blocked" ? "100.00" : "—";
     return (
       <div className="min-w-0">
         <div className="flex min-w-0 items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
-            <span className={`size-1.5 shrink-0 rounded-full ${state === "available" ? "bg-success" : state === "blocked" ? "bg-warning" : "bg-muted-foreground/40"}`} aria-hidden="true" />
+            <span className={`size-1.5 shrink-0 rounded-full ${overLimit || state === "blocked" || (used != null && used >= 100) ? "bg-warning" : state === "available" ? "bg-success" : "bg-muted-foreground/40"}`} aria-hidden="true" />
             <span className="truncate text-xs font-medium text-muted-foreground">{label}</span>
           </div>
-          <span className={`shrink-0 text-[10px] font-medium ${state === "available" ? "text-success" : state === "blocked" ? "text-warning" : "text-muted-foreground"}`}>{stateLabel}</span>
+          <span className={`shrink-0 text-[10px] font-medium ${overLimit || state === "blocked" || (used != null && used >= 100) ? "text-warning" : state === "available" ? "text-success" : "text-muted-foreground"}`}>{stateLabel}</span>
         </div>
         <div className="mt-3 flex min-w-0 items-baseline gap-1">
           <span className="font-mono text-2xl font-medium tracking-[-0.04em] tabular-nums">{primary}</span>
-          <span className="text-[11px] text-muted-foreground">{remaining != null || state === "blocked" ? "% 可用" : "暂无数据"}</span>
+          <span className="text-[11px] text-muted-foreground">{used != null || state === "blocked" ? "% 已用" : "暂无数据"}</span>
         </div>
         <div
           className="mt-2 h-1 overflow-hidden rounded-full bg-black/5"
           role="progressbar"
           aria-label={`${label} 已使用额度`}
           aria-valuemin={0}
-          aria-valuemax={100}
+          aria-valuemax={Math.max(100, used ?? 100)}
           aria-valuenow={used ?? undefined}
         >
-          <div className={`h-full rounded-full ${used != null && used >= 100 ? "bg-warning" : "bg-foreground/70"}`} style={{ width: `${used ?? 0}%` }} />
+          <div className={`h-full rounded-full ${used != null && used >= 100 ? "bg-warning" : "bg-foreground/70"}`} style={{ width: `${Math.min(100, used ?? 0)}%` }} />
         </div>
+        {usedTokens != null && limitTokens != null ? (
+          <p className="mt-2 font-mono text-[10px] text-muted-foreground">
+            {compactNumber(usedTokens)} / {compactNumber(limitTokens)} tokens
+            {overLimit ? ` · 超 ${compactNumber(usedTokens - limitTokens)}` : ""}
+          </p>
+        ) : null}
         <div className="mt-3 grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 border-t pt-2.5 text-[10px]">
           <span className="text-muted-foreground">{resetLabel}</span>
           <span className="truncate text-right font-mono text-foreground" title={reset ?? undefined}>{reset ?? (state === "unknown" ? "尚无观测" : "未返回")}</span>
@@ -217,28 +233,33 @@ export function QuotaStatus({
     <div className="min-w-0">
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-1.5">
-        <span className={`size-1.5 shrink-0 rounded-full ${state === "available" ? "bg-success" : state === "blocked" ? "bg-warning" : "bg-muted-foreground/40"}`} aria-hidden="true" />
+        <span className={`size-1.5 shrink-0 rounded-full ${overLimit || state === "blocked" || (used != null && used >= 100) ? "bg-warning" : state === "available" ? "bg-success" : "bg-muted-foreground/40"}`} aria-hidden="true" />
         <span className="truncate text-xs font-medium">{label}</span>
         </div>
-        {remaining != null ? <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{remaining}%</span> : null}
+        {used != null ? <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{used.toFixed(2)}%</span> : null}
       </div>
       <div
         className="mt-1.5 h-1 overflow-hidden rounded-full bg-black/5"
         role="progressbar"
         aria-label={`${label} 已使用额度`}
         aria-valuemin={0}
-        aria-valuemax={100}
+        aria-valuemax={Math.max(100, used ?? 100)}
         aria-valuenow={used ?? undefined}
       >
-        <div className={`h-full rounded-full ${used != null && used >= 100 ? "bg-warning" : "bg-foreground/70"}`} style={{ width: `${used ?? 0}%` }} />
+        <div className={`h-full rounded-full ${used != null && used >= 100 ? "bg-warning" : "bg-foreground/70"}`} style={{ width: `${Math.min(100, used ?? 0)}%` }} />
       </div>
-      {quota?.limitValue != null && quota?.remainingValue != null ? (
-        <p className="mt-1 truncate font-mono text-[10px] text-muted-foreground" title={`${quota.limitValue - quota.remainingValue} / ${quota.limitValue} tokens`}>
-          {compactNumber(quota.limitValue - quota.remainingValue)} / {compactNumber(quota.limitValue)} tokens
+      {usedTokens != null && limitTokens != null ? (
+        <p className="mt-1 truncate font-mono text-[10px] text-muted-foreground" title={`${usedTokens} / ${limitTokens} tokens`}>
+          {compactNumber(usedTokens)} / {compactNumber(limitTokens)} tokens
+          {overLimit ? ` · 超 ${compactNumber(usedTokens - limitTokens)}` : ""}
         </p>
       ) : (
       <p className="mt-1 truncate font-mono text-[10px] text-muted-foreground" title={reset ?? undefined}>
-        {state === "available" ? (reset ? `重置 ${reset}` : "已观测") : state === "blocked" ? (reset ? `重置 ${reset}` : "已耗尽") : "等待首次请求或手动同步"}
+        {overLimit || state === "blocked" || (used != null && used >= 100)
+          ? (reset ? `重置 ${reset}` : overLimit ? "已超限" : "已耗尽")
+          : state === "available"
+            ? (reset ? `重置 ${reset}` : "已观测")
+            : "等待首次请求或手动同步"}
       </p>
       )}
     </div>

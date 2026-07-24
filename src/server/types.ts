@@ -114,7 +114,7 @@ export interface QuotaSnapshot {
   usagePercent: number
   resetAt: string | null
   lastObservedAt: string
-  source: "DASHBOARD" | "UPSTREAM_429" | "UPSTREAM_HEADER" | "API_PROBE"
+  source: "DASHBOARD" | "UPSTREAM_429" | "UPSTREAM_HEADER" | "API_PROBE" | "LOCAL_USAGE"
   limitValue?: number | null
   remainingValue?: number | null
 }

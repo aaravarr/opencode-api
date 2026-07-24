@@ -11,6 +11,7 @@ import { collectRequestHeaders } from "./client-meta"
 import { captureJsonResponse, ensureStreamUsage, extractBodyError, extractUsage, isLogOk, safeCloneBody, teeAndCapture, type CaptureResult, type TokenUsage } from "./capture"
 import { tryGetProvider, getProviderRegistry, type UpstreamErrorClassification } from "./providers"
 import { resolveMirrorUrl } from "./api-fetch"
+import { upsertLocalRollingUsage } from "./quota-usage"
 
 export interface AccessCredential { accountId: string; goApiKey: string; credentialVersion: number }
 export interface CredentialProvider { get(ownerUserId: string, accountId: string): Promise<AccessCredential> }
@@ -447,6 +448,15 @@ export class GatewayService {
         usage.promptTokens ?? null, usage.completionTokens ?? null, usage.totalTokens ?? null, usage.cachedTokens ?? null, usage.reasoningTokens ?? null, usage.textTokens ?? null, usage.imageTokens ?? null, usage.audioTokens ?? null,
         id,
       )
+    // xAI free tier headers are often stale (remaining always 1M). After a
+    // successful response, recompute rolling usage from local request logs so
+    // the progress bar reflects actual consumption.
+    if (input.ok === 1 && input.accountId) {
+      const account = this.db.prepare("SELECT owner_user_id, pool_type FROM accounts WHERE id=?").get(input.accountId) as { owner_user_id: string; pool_type: string } | undefined
+      if (account?.pool_type === "xai-grok") {
+        try { upsertLocalRollingUsage(account.owner_user_id, input.accountId, this.db) } catch { /* best-effort */ }
+      }
+    }
     const settings = input.logSettings
     if (settings && settings.loggingEnabled) {
       const wantBodies = settings.logBodies || (input.ok !== 1 && settings.logBodiesOnError)
@@ -497,6 +507,11 @@ export class GatewayService {
     const ownerRow = this.db.prepare("SELECT owner_user_id FROM accounts WHERE id=?").get(accountId) as { owner_user_id: string } | undefined
     const ownerUserId = ownerRow?.owner_user_id ?? ""
     for (const w of windows) {
+      // Ignore obviously-stale full-remaining token windows from xAI headers.
+      // Local usage tracking will fill the real progress after the request completes.
+      if (w.kind === "ROLLING_24H" && w.limitValue && w.remainingValue != null && w.limitValue === w.remainingValue && w.usagePercent === 0) {
+        continue
+      }
       const resetAt = w.resetInSeconds ? new Date(now.getTime() + w.resetInSeconds * 1000).toISOString() : null
       this.db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at,limit_value,remaining_value)
         VALUES(?,?,?,?,?,'UPSTREAM_HEADER',?,?,?) ON CONFLICT(owner_user_id,account_id,kind) DO UPDATE SET

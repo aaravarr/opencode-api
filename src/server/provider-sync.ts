@@ -4,6 +4,7 @@ import { tryGetProvider } from "./providers"
 import { XAIAccountBannedError } from "./providers/xai-grok"
 import { AccountRepository } from "./repository"
 import { RoutingService } from "./routing"
+import { upsertLocalRollingUsage } from "./quota-usage"
 
 export async function syncProviderAccount(ownerUserId: string, accountId: string, db: AppDatabase = getDatabase()) {
   const accounts = new AccountRepository(ownerUserId, db)
@@ -17,12 +18,34 @@ export async function syncProviderAccount(ownerUserId: string, accountId: string
     const timestamp = new Date().toISOString()
     db.transaction(() => {
       for (const window of windows) {
+        // xAI free probe often returns remaining=limit (0% used) even after heavy
+        // traffic. Don't let that overwrite a higher local/previous usage snapshot.
+        if (
+          account.poolType === "xai-grok"
+          && window.kind === "ROLLING_24H"
+          && window.limitValue
+          && window.remainingValue != null
+          && window.limitValue === window.remainingValue
+          && window.usagePercent === 0
+        ) {
+          continue
+        }
         db.prepare(`INSERT INTO quota_windows(owner_user_id,account_id,kind,usage_percent,reset_at,source,last_observed_at,limit_value,remaining_value)
           VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(owner_user_id,account_id,kind) DO UPDATE SET
-          usage_percent=excluded.usage_percent,reset_at=excluded.reset_at,source=excluded.source,
-          limit_value=excluded.limit_value,remaining_value=excluded.remaining_value,
+          usage_percent=MAX(usage_percent, excluded.usage_percent),
+          reset_at=excluded.reset_at,
+          source=CASE WHEN excluded.usage_percent >= usage_percent THEN excluded.source ELSE source END,
+          limit_value=COALESCE(excluded.limit_value, limit_value),
+          remaining_value=CASE
+            WHEN excluded.remaining_value IS NULL THEN remaining_value
+            WHEN remaining_value IS NULL THEN excluded.remaining_value
+            ELSE MIN(remaining_value, excluded.remaining_value)
+          END,
           observation_version=observation_version+1,last_observed_at=excluded.last_observed_at`)
           .run(ownerUserId, accountId, window.kind, window.usagePercent, window.resetAt, window.source, window.lastObservedAt, window.limitValue ?? null, window.remainingValue ?? null)
+      }
+      if (account.poolType === "xai-grok") {
+        upsertLocalRollingUsage(ownerUserId, accountId, db)
       }
       db.prepare(`UPDATE accounts SET last_usage_check_at=?,last_synced_at=?,next_usage_check_at=?,auth_state='VALID',last_error=NULL,updated_at=? WHERE id=? AND owner_user_id=?`)
         .run(timestamp, timestamp, new Date(Date.now() + 5 * 60_000).toISOString(), timestamp, accountId, ownerUserId)

@@ -155,6 +155,11 @@ function parseNumberFromHeader(value: string | null): number | null {
   return Number.isFinite(n) ? n : null
 }
 
+function roundPercent(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.round(Math.max(0, Math.min(100, value)) * 100) / 100
+}
+
 function toISOFromUnixSeconds(unixSeconds: number): string {
   return new Date(unixSeconds * 1000).toISOString()
 }
@@ -353,7 +358,7 @@ export class XAIGrokProvider implements Provider {
     if (hasTokenWindow) {
       const usagePercent =
         limitTokens !== null && remainingTokens !== null
-          ? Math.max(0, Math.min(100, ((limitTokens - remainingTokens) / limitTokens) * 100))
+          ? roundPercent(((limitTokens - remainingTokens) / limitTokens) * 100)
           : remainingTokens !== null && remainingTokens === 0
             ? 100
             : 0
