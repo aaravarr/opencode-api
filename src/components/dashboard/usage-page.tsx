@@ -25,6 +25,7 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart";
 import { EmptyState, ErrorState, LoadingTable, PageIntro, Panel } from "./page-kit";
+import { QuotaForecastPanel } from "./quota-forecast-panel";
 import { useAdminResource } from "./use-admin-resource";
 import { PoolTypeBadge } from "./status-ui";
 import type { Bucket, UsageStats } from "./types";
@@ -177,6 +178,7 @@ export function UsagePage() {
       {data ? (
         <div className="space-y-4">
           <KpiRow summary={data.summary} />
+          <QuotaForecastPanel defaultPoolType={poolType || "all"} />
 
           {resource.error ? null : (
             <>

@@ -223,6 +223,38 @@ export interface UsageSummary {
   reasoningTokens: number;
 }
 
+
+export interface QuotaForecastPoint {
+  at: string;
+  hourOffset: number;
+  label: string;
+  primaryAvailablePercent: number;
+  tightestAvailablePercent: number;
+  routingReadyAccounts: number;
+  eligibleAccounts: number;
+  availableTokens: number | null;
+}
+
+export interface QuotaForecastSummary {
+  nowPrimaryAvailablePercent: number;
+  laterPrimaryAvailablePercent: number;
+  nowRoutingReadyAccounts: number;
+  laterRoutingReadyAccounts: number;
+  peakRoutingReadyAccounts: number;
+  peakAt: string | null;
+  primaryWindow: "fiveHour" | "rolling24h" | "mixed";
+}
+
+export interface QuotaForecastResult {
+  generatedAt: string;
+  hours: number;
+  poolType: string | null;
+  primaryWindow: "fiveHour" | "rolling24h" | "mixed";
+  points: QuotaForecastPoint[];
+  summary: QuotaForecastSummary;
+  notes?: string[];
+}
+
 export interface UsageStats {
   summary: UsageSummary;
   byTime: Bucket[];

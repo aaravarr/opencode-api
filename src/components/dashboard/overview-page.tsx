@@ -7,6 +7,7 @@ import { Bar, CartesianGrid, ComposedChart, Line, XAxis, YAxis } from "recharts"
 import { Button } from "@/components/ui/button";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { PageIntro, Panel, ErrorState, LoadingTable, EmptyState, formatDate } from "./page-kit";
+import { QuotaForecastPanel } from "./quota-forecast-panel";
 import { StatusBadge } from "./status-ui";
 import { useAdminResource } from "./use-admin-resource";
 import type { OverviewPayload, UsageStats } from "./types";
@@ -57,6 +58,8 @@ export function OverviewPage() {
               </div>
             </Panel>
           ) : null}
+
+          <QuotaForecastPanel compact />
 
           <Panel title="24 小时 Token 趋势" description="堆叠柱图展示 Token 分段，折线展示请求数。">
             {usageResource.loading ? <LoadingTable rows={3} columns={6} /> : usageResource.error ? (
