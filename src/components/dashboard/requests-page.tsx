@@ -19,6 +19,7 @@ const pageSize = 20;
 interface AccountsResponse { items?: { id: string; poolType?: string }[]; accounts?: { id: string; poolType?: string }[] }
 
 
+
 function normalizeEndpointLabel(value?: string | null): string {
   if (!value) return "—"
   const v = value.replace(/^\/?v1\//, "").replace(/^raw\/v1\//, "raw/")
@@ -36,26 +37,64 @@ function formatRouteLabel(request: RequestRecord): string {
   return inbound
 }
 
-function routeBadgeClass(request: RequestRecord): string {
-  const label = formatRouteLabel(request)
-  if (label.includes("→")) return "border-amber-200 bg-amber-50 text-amber-800"
-  if (label.includes("raw")) return "border-slate-200 bg-slate-50 text-slate-700"
-  if (label === "chat") return "border-sky-200 bg-sky-50 text-sky-800"
-  if (label === "responses") return "border-emerald-200 bg-emerald-50 text-emerald-800"
-  return "border-border bg-[#fafafa] text-muted-foreground"
-}
-
-function formatTransformLabel(request: RequestRecord): string {
-  if (request.transformSummary) return request.transformSummary
-  if (request.converted) return `converted${request.routeReason ? ` · ${request.routeReason}` : ""}`
-  if (request.processMode === "raw") return "raw passthrough"
-  if (request.routeMode === "responses") return request.routeReason || "responses-native"
-  if (request.routeMode === "chat") return request.routeReason || "chat"
-  return request.processMode || "—"
-}
-
 function hasInjectedServerTools(request: RequestRecord): boolean {
   return String(request.transformSummary || "").includes("inject:web_search+x_search")
+}
+
+function explainRouteReason(reason?: string | null): string {
+  const r = String(reason || "").trim()
+  if (!r) return "没有额外路由说明。"
+  if (r === "prefer_responses_server_tools") {
+    return "这次请求带有或需要服务端搜索工具（如 web_search / x_search），所以强制走 Responses，避免被转成 Chat 后丢失工具。"
+  }
+  if (r === "responses_native") return "按正常 Responses 路径处理，没有触发特殊回退。"
+  if (r === "responses_compact") return "这是 Responses 的 compact 压缩请求，固定走原生 Responses。"
+  if (r === "session_lineage_responses") return "同一会话之前走的是 Responses，所以继续沿用 Responses。"
+  if (r === "session_lineage_chat") return "同一会话之前走的是 Chat，所以这次也回退到 Chat。"
+  if (r.startsWith("foreign_previous_response_id")) return "请求带了本地没有记录的 previous_response_id，为了兼容连续性，改走 Chat。"
+  if (r.startsWith("foreign_opaque")) return "请求历史里有本地无法安全复用的加密/压缩片段，为了避免上游报错，改走 Chat。"
+  if (r.startsWith("foreign_history")) return "请求同时带有陌生历史 ID 和加密片段，兼容性不足，改走 Chat。"
+  if (r === "raw_passthrough") return "走的是原生透传接口，网关几乎不做协议改写。"
+  if (r === "direct") return "直接转发，没有做 Responses 协议转换。"
+  if (r === "chat_fallback") return "从 Responses 回退到了 Chat Completions。"
+  return `路由原因：${r}`
+}
+
+function explainRouteStory(request: RequestRecord): string {
+  const route = formatRouteLabel(request)
+  const injected = hasInjectedServerTools(request)
+  const parts: string[] = []
+
+  if (request.processMode === "raw" || route.includes("raw/")) {
+    parts.push("客户端走的是原生透传接口，网关基本原样转发。")
+  } else if (route === "responses → chat" || request.converted) {
+    parts.push("客户端请求的是 Responses，但网关判断后改成了 Chat Completions 再处理。")
+  } else if (route === "responses") {
+    parts.push("客户端请求的是 Responses，并继续走 Responses 上游。")
+  } else if (route === "chat") {
+    parts.push("客户端请求的是 Chat Completions，直接按 Chat 处理。")
+  } else {
+    parts.push(`请求路径：${route}。`)
+  }
+
+  if (injected) {
+    parts.push("处理过程中自动补充了服务端搜索工具 web_search 和 x_search。")
+  } else if (route.includes("responses") && request.processMode !== "raw") {
+    parts.push("没有自动注入内置搜索工具。")
+  }
+
+  if (String(request.transformSummary || "").includes("sanitize-input")) {
+    parts.push("同时清理/修正了部分输入历史，降低上游协议报错概率。")
+  }
+  if (String(request.transformSummary || "").includes("remap-codex")) {
+    parts.push("返回结果做了 Codex 兼容重映射。")
+  }
+  if (String(request.transformSummary || "").includes("chat-to-responses")) {
+    parts.push("Chat 上游返回后又转回 Responses 形态给客户端。")
+  }
+
+  parts.push(explainRouteReason(request.routeReason))
+  return parts.join("")
 }
 
 export function RequestsPage() {
@@ -158,13 +197,11 @@ export function RequestsPage() {
         ) : !items.length ? (
           <EmptyState title="暂无请求记录" description="没有匹配当前过滤条件的请求，尝试调整搜索或过滤。" />
         ) : (
-          <Table className="min-w-[1480px]">
+          <Table className="min-w-[1180px]">
             <TableHeader className="bg-[#fafafa]">
               <TableRow>
                 <TableHead className="px-4 text-xs text-muted-foreground">时间</TableHead>
                 <TableHead className="text-xs text-muted-foreground">模型</TableHead>
-                <TableHead className="text-xs text-muted-foreground">端点</TableHead>
-                <TableHead className="text-xs text-muted-foreground">转换</TableHead>
                 <TableHead className="text-xs text-muted-foreground">密钥</TableHead>
                 <TableHead className="text-xs text-muted-foreground">结果</TableHead>
                 <TableHead className="text-xs text-muted-foreground">服务账号</TableHead>
@@ -182,16 +219,6 @@ export function RequestsPage() {
                 <TableRow key={request.id}>
                   <TableCell className="px-4 font-mono text-xs text-muted-foreground">{formatDate(request.createdAt)}</TableCell>
                   <TableCell className="font-medium text-sm">{request.model || "未知"}</TableCell>
-                  <TableCell className="max-w-[220px]" title={formatTransformLabel(request)}>
-                    <span className={`inline-flex max-w-full items-center truncate rounded-md border px-1.5 py-0.5 font-mono text-[11px] font-medium ${routeBadgeClass(request)}`}>
-                      {formatRouteLabel(request)}
-                    </span>
-                  </TableCell>
-                  <TableCell className="max-w-[260px] truncate font-mono text-[11px] text-muted-foreground" title={formatTransformLabel(request)}>
-                    {request.converted ? "已转换" : (request.processMode === "raw" ? "原生透传" : "处理后")}
-                    {hasInjectedServerTools(request) ? " · 注入工具" : ""}
-                    {request.routeReason ? ` · ${request.routeReason}` : ""}
-                  </TableCell>
                   <TableCell className="text-xs text-muted-foreground">{request.apiKeyName || request.apiKeyPrefix || "未记录"}</TableCell>
                   <TableCell>
                     <StatusBadge status={request.ok ? "success" : request.status != null ? "failed" : "unknown"} />
@@ -318,30 +345,18 @@ function RequestDetailSheet({ request, onOpenChange, poolType }: { request: Requ
 
 function RouteTransformPanel({ request }: { request: RequestDetail["request"] }) {
   const route = formatRouteLabel(request)
+  const story = explainRouteStory(request)
   const injected = hasInjectedServerTools(request)
   return (
     <div className="rounded-md border bg-[#fafafa] p-3">
-      <h3 className="mb-3 text-sm font-medium">路由与转换</h3>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className={`inline-flex items-center rounded-md border px-2 py-1 font-mono text-xs font-medium ${routeBadgeClass(request)}`}>
-          {route}
-        </span>
-        <span className={`inline-flex items-center rounded-md border px-2 py-1 text-xs ${request.converted ? "border-amber-200 bg-amber-50 text-amber-800" : "border-border bg-white text-muted-foreground"}`}>
-          {request.converted ? "发生转换" : "未转换"}
-        </span>
-        <span className={`inline-flex items-center rounded-md border px-2 py-1 text-xs ${injected ? "border-violet-200 bg-violet-50 text-violet-800" : "border-border bg-white text-muted-foreground"}`}>
-          {injected ? "已注入 web_search + x_search" : "未注入内置工具"}
-        </span>
-        <span className="inline-flex items-center rounded-md border border-border bg-white px-2 py-1 font-mono text-xs text-muted-foreground">
-          model: {request.model || "—"}
-        </span>
+      <h3 className="mb-2 text-sm font-medium">这次请求怎么走的</h3>
+      <p className="text-sm leading-6 text-foreground">{story}</p>
+      <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+        <div>使用模型：<span className="font-mono text-foreground">{request.model || "—"}</span></div>
+        <div>路径标签：<span className="font-mono text-foreground">{route}</span></div>
+        <div>是否改写协议：<span className="text-foreground">{request.converted ? "是，Responses 转成了 Chat" : "否"}</span></div>
+        <div>是否注入搜索工具：<span className="text-foreground">{injected ? "是，补充了 web_search / x_search" : "否"}</span></div>
       </div>
-      {request.routeReason ? (
-        <p className="mt-2 font-mono text-[11px] text-muted-foreground">原因：{request.routeReason}</p>
-      ) : null}
-      {request.transformSummary ? (
-        <p className="mt-1 break-all font-mono text-[11px] text-muted-foreground">摘要：{request.transformSummary}</p>
-      ) : null}
     </div>
   )
 }
@@ -351,14 +366,6 @@ function BasicInfo({ request, poolType }: { request: RequestDetail["request"]; p
     ["密钥", request.apiKeyName || request.apiKeyPrefix || "—"],
     ["__account__", request.accountName || "—"],
     ["模型", request.model || "—"],
-    ["路由路径", formatRouteLabel(request)],
-    ["客户端端点", request.inboundEndpoint || (request.endpoint ? `v1/${request.endpoint}` : "—")],
-    ["实际上游", request.upstreamEndpoint || request.endpoint || "—"],
-    ["处理模式", request.processMode === "raw" ? "原生透传" : request.processMode === "processed" ? "处理后" : (request.processMode || "—")],
-    ["是否转换", request.converted ? "是（responses → chat）" : "否"],
-    ["注入工具", hasInjectedServerTools(request) ? "是（web_search + x_search）" : "否"],
-    ["转换原因", request.routeReason || "—"],
-    ["转换摘要", request.transformSummary || "—"],
     ["Stream", request.stream ? "是" : "否"],
     ["HTTP 状态", request.status != null ? String(request.status) : "—"],
     ["结果", request.outcome || (request.ok ? "success" : "fail")],
