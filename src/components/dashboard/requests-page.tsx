@@ -41,60 +41,27 @@ function hasInjectedServerTools(request: RequestRecord): boolean {
   return String(request.transformSummary || "").includes("inject:web_search+x_search")
 }
 
-function explainRouteReason(reason?: string | null): string {
-  const r = String(reason || "").trim()
-  if (!r) return "没有额外路由说明。"
-  if (r === "prefer_responses_server_tools") {
-    return "这次请求带有或需要服务端搜索工具（如 web_search / x_search），所以强制走 Responses，避免被转成 Chat 后丢失工具。"
-  }
-  if (r === "responses_native") return "按正常 Responses 路径处理，没有触发特殊回退。"
-  if (r === "responses_compact") return "这是 Responses 的 compact 压缩请求，固定走原生 Responses。"
-  if (r === "session_lineage_responses") return "同一会话之前走的是 Responses，所以继续沿用 Responses。"
-  if (r === "session_lineage_chat") return "同一会话之前走的是 Chat，所以这次也回退到 Chat。"
-  if (r.startsWith("foreign_previous_response_id")) return "请求带了本地没有记录的 previous_response_id，为了兼容连续性，改走 Chat。"
-  if (r.startsWith("foreign_opaque")) return "请求历史里有本地无法安全复用的加密/压缩片段，为了避免上游报错，改走 Chat。"
-  if (r.startsWith("foreign_history")) return "请求同时带有陌生历史 ID 和加密片段，兼容性不足，改走 Chat。"
-  if (r === "raw_passthrough") return "走的是原生透传接口，网关几乎不做协议改写。"
-  if (r === "direct") return "直接转发，没有做 Responses 协议转换。"
-  if (r === "chat_fallback") return "从 Responses 回退到了 Chat Completions。"
-  return `路由原因：${r}`
-}
-
 function explainRouteStory(request: RequestRecord): string {
   const route = formatRouteLabel(request)
   const injected = hasInjectedServerTools(request)
-  const parts: string[] = []
+  const reason = String(request.routeReason || "")
 
-  if (request.processMode === "raw" || route.includes("raw/")) {
-    parts.push("客户端走的是原生透传接口，网关基本原样转发。")
-  } else if (route === "responses → chat" || request.converted) {
-    parts.push("客户端请求的是 Responses，但网关判断后改成了 Chat Completions 再处理。")
-  } else if (route === "responses") {
-    parts.push("客户端请求的是 Responses，并继续走 Responses 上游。")
-  } else if (route === "chat") {
-    parts.push("客户端请求的是 Chat Completions，直接按 Chat 处理。")
-  } else {
-    parts.push(`请求路径：${route}。`)
+  if (request.processMode === "raw" || route.includes("raw/")) return "原生透传，未改写。"
+  if (route === "responses → chat" || request.converted) {
+    if (reason.startsWith("foreign_previous_response_id")) return "Responses → Chat：本地没有对应会话历史。"
+    if (reason.startsWith("foreign_opaque") || reason.startsWith("foreign_history")) return "Responses → Chat：历史状态无法安全复用。"
+    if (reason === "session_lineage_chat") return "Responses → Chat：该会话此前走 Chat。"
+    return "Responses → Chat：兼容回退。"
   }
-
-  if (injected) {
-    parts.push("处理过程中自动补充了服务端搜索工具 web_search 和 x_search。")
-  } else if (route.includes("responses") && request.processMode !== "raw") {
-    parts.push("没有自动注入内置搜索工具。")
+  if (route === "responses") {
+    if (reason === "prefer_responses_server_tools") {
+      return injected ? "走 Responses，并注入了搜索工具。" : "走 Responses，保留服务端搜索工具。"
+    }
+    if (injected) return "走 Responses，并注入了搜索工具。"
+    return "走 Responses。"
   }
-
-  if (String(request.transformSummary || "").includes("sanitize-input")) {
-    parts.push("同时清理/修正了部分输入历史，降低上游协议报错概率。")
-  }
-  if (String(request.transformSummary || "").includes("remap-codex")) {
-    parts.push("返回结果做了 Codex 兼容重映射。")
-  }
-  if (String(request.transformSummary || "").includes("chat-to-responses")) {
-    parts.push("Chat 上游返回后又转回 Responses 形态给客户端。")
-  }
-
-  parts.push(explainRouteReason(request.routeReason))
-  return parts.join("")
+  if (route === "chat") return "走 Chat。"
+  return `路径：${route}`
 }
 
 export function RequestsPage() {
@@ -344,19 +311,11 @@ function RequestDetailSheet({ request, onOpenChange, poolType }: { request: Requ
 }
 
 function RouteTransformPanel({ request }: { request: RequestDetail["request"] }) {
-  const route = formatRouteLabel(request)
-  const story = explainRouteStory(request)
-  const injected = hasInjectedServerTools(request)
   return (
     <div className="rounded-md border bg-[#fafafa] p-3">
-      <h3 className="mb-2 text-sm font-medium">这次请求怎么走的</h3>
-      <p className="text-sm leading-6 text-foreground">{story}</p>
-      <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
-        <div>使用模型：<span className="font-mono text-foreground">{request.model || "—"}</span></div>
-        <div>路径标签：<span className="font-mono text-foreground">{route}</span></div>
-        <div>是否改写协议：<span className="text-foreground">{request.converted ? "是，Responses 转成了 Chat" : "否"}</span></div>
-        <div>是否注入搜索工具：<span className="text-foreground">{injected ? "是，补充了 web_search / x_search" : "否"}</span></div>
-      </div>
+      <h3 className="mb-1 text-sm font-medium">路由说明</h3>
+      <p className="text-sm text-foreground">{explainRouteStory(request)}</p>
+      <p className="mt-1 font-mono text-xs text-muted-foreground">{request.model || "—"} · {formatRouteLabel(request)}</p>
     </div>
   )
 }
