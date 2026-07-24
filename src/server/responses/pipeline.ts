@@ -144,13 +144,17 @@ export async function prepareResponsesRequestBody(
     if (eager.eager) {
       route = "chat"
       routeReason = eager.reason || "session_lineage_chat"
+    } else if (eager.reason) {
+      routeReason = eager.reason
     }
   }
 
   // PHASE 2: process only for chosen path.
   if (route === "chat") {
     const stored = await loadConversationMessages(continuityKeys, db)
-    const converted = buildChatFallbackFromResponsesWithContext(body, stored)
+    // Use bodyForRoute so any injected server tools survive decision metadata;
+    // chat conversion itself still only keeps function tools (xAI chat has no x_search).
+    const converted = buildChatFallbackFromResponsesWithContext(bodyForRoute, stored)
     const chatBody = prepareChatRequestBody(converted.body)
     return {
       body: chatBody,

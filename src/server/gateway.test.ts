@@ -283,20 +283,14 @@ describe("gateway logging", () => {
     expect(response.status).toBe(200)
     expect(sent.tools).toBeUndefined()
   })
-  it("chat eager-fallback routes to chat/completions and returns responses shape", async () => {
+  it("Grok responses stay on native path with injected server tools even if previous_response_id is foreign", async () => {
     const { db, apiKey, credentials, hasher } = setup("xai-grok")
     let sentUrl = ""
     let sent: any = null
     const fetcher = vi.fn().mockImplementation(async (url, init) => {
       sentUrl = String(url)
       sent = JSON.parse(new TextDecoder().decode(init.body as Uint8Array))
-      return Response.json({
-        id: "chatcmpl_1",
-        object: "chat.completion",
-        model: "grok-4.5",
-        choices: [{ index: 0, message: { role: "assistant", content: "fallback-ok" }, finish_reason: "stop" }],
-        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-      })
+      return Response.json({ id: "resp_ok", object: "response", output: [], tools: sent.tools || [] })
     })
     const req = new Request("http://localhost/v1/responses", {
       method: "POST",
@@ -304,16 +298,15 @@ describe("gateway logging", () => {
       body: JSON.stringify({
         model: "grok-4.5",
         previous_response_id: "resp_unknown_xyz",
-        input: "continue please",
+        input: "Use x_search to find recent posts about Elon Musk",
       }),
     })
-    // foreign previous_response_id without store hit should eager-fallback even for Grok
     const response = await new GatewayService(credentials, db, fetcher, hasher).handle(req, "responses")
     expect(response.status).toBe(200)
-    expect(sentUrl).toContain("/chat/completions")
-    expect(Array.isArray(sent.messages)).toBe(true)
-    expect(response.headers.get("x-grok-fallback")).toBe("chat_completions")
-    const json = await response.json() as any
-    expect(json.object === "response" || Array.isArray(json.output) || json.output_text || json.id).toBeTruthy()
+    expect(sentUrl).toContain("/responses")
+    expect(sent.tools).toEqual(expect.arrayContaining([{ type: "web_search" }, { type: "x_search" }]))
+    expect(response.headers.get("x-responses-route")).toBe("responses")
+    expect(response.headers.get("x-responses-route-reason")).toBe("prefer_responses_server_tools")
+    expect(response.headers.get("x-grok-fallback")).toBeNull()
   })
 })

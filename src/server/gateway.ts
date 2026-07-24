@@ -454,6 +454,10 @@ export class GatewayService {
             if (chatFallbackUsed) outStream = convertChatStreamToResponses(outStream, responsesModelHint, responsesToolContext)
             else if (processResponses && responsesToolContext) outStream = remapResponsesSuccessStream(outStream, responsesToolContext)
             const headers = responseHeaders(upstream.headers)
+            if (processResponses) {
+              headers.set("x-responses-route", responsesRoute)
+              if (responsesRouteReason) headers.set("x-responses-route-reason", responsesRouteReason)
+            }
             if (chatFallbackUsed) {
               headers.set("x-grok-fallback", "chat_completions")
               headers.set("x-grok-fallback-from", "/v1/responses")
@@ -476,6 +480,10 @@ export class GatewayService {
             })
           }
           const headers = responseHeaders(upstream.headers)
+          if (processResponses) {
+            headers.set("x-responses-route", responsesRoute)
+            if (responsesRouteReason) headers.set("x-responses-route-reason", responsesRouteReason)
+          }
           if (chatFallbackUsed) {
             headers.set("x-grok-fallback", "chat_completions")
             headers.set("x-grok-fallback-from", "/v1/responses")
@@ -525,6 +533,10 @@ export class GatewayService {
           }
 
           const headers = responseHeaders(upstream.headers)
+          if (processResponses) {
+            headers.set("x-responses-route", responsesRoute)
+            if (responsesRouteReason) headers.set("x-responses-route-reason", responsesRouteReason)
+          }
           if (chatFallbackUsed) {
             headers.set("x-grok-fallback", "chat_completions")
             headers.set("x-grok-fallback-from", "/v1/responses")

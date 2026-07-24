@@ -61,7 +61,7 @@ describe("responses pipeline", () => {
     expect(JSON.parse((result.body as any).input[0].arguments)).toEqual({ input: "diff" })
   })
 
-  it("eager falls back to chat on foreign previous_response_id without store hit", async () => {
+  it("eager falls back to chat on foreign previous_response_id without store hit when no server tools", async () => {
     const db = createDatabase(":memory:")
     const prepared = await prepareResponsesRequestBody({
       model: "gpt-test",
@@ -73,7 +73,7 @@ describe("responses pipeline", () => {
     expect((prepared.body as any).messages).toBeTruthy()
   })
 
-  it("eager falls back to chat on foreign opaque items", async () => {
+  it("eager falls back to chat on foreign opaque items when no server tools", async () => {
     const db = createDatabase(":memory:")
     const prepared = await prepareResponsesRequestBody({
       model: "gpt-test",
@@ -83,7 +83,21 @@ describe("responses pipeline", () => {
     expect(prepared.routeReason).toMatch(/foreign_opaque/)
   })
 
-  it("keeps responses route when server tools preferred and no foreign residue", async () => {
+  it("keeps responses route for Grok even with foreign previous_response_id so x_search can work", async () => {
+    const db = createDatabase(":memory:")
+    const prepared = await prepareResponsesRequestBody({
+      model: "grok-4.5",
+      previous_response_id: "resp_missing_123",
+      input: "Use x_search to find recent posts about Elon Musk",
+    }, { db })
+    expect(prepared.route).toBe("responses")
+    expect(prepared.routeReason).toBe("prefer_responses_server_tools")
+    const tools = (prepared.body as any).tools as Array<{ type: string }>
+    expect(tools.some((t) => t.type === "x_search")).toBe(true)
+    expect(tools.some((t) => t.type === "web_search")).toBe(true)
+  })
+
+  it("keeps responses route when server tools preferred even on chat lineage", async () => {
     const db = createDatabase(":memory:")
     await rememberConversationTurn({
       responseId: "resp_known",
@@ -97,9 +111,8 @@ describe("responses pipeline", () => {
       client_metadata: { thread_id: "t1" },
       input: "search again",
     }, { db })
-    // Grok injects server tools, so chat lineage should stay on responses.
     expect(prepared.route).toBe("responses")
-    expect(prepared.routeReason).toMatch(/prefer_responses_server_tools|responses_native|session_lineage/)
+    expect(prepared.routeReason).toBe("prefer_responses_server_tools")
   })
 })
 
@@ -112,6 +125,15 @@ describe("shouldEagerFallbackResponses", () => {
   it("responses lineage never eagers", () => {
     const r = shouldEagerFallbackResponses({ model: "x", previous_response_id: "resp_1", input: "hi" }, { preferredMode: "responses", storeHit: false })
     expect(r.eager).toBe(false)
+  })
+
+  it("server tools preference blocks all eager fallbacks", () => {
+    const r = shouldEagerFallbackResponses(
+      { model: "grok-4.5", previous_response_id: "resp_1", input: [{ type: "reasoning", encrypted_content: "x" }] },
+      { preferredMode: "chat", storeHit: false, preferResponsesForServerTools: true },
+    )
+    expect(r.eager).toBe(false)
+    expect(r.reason).toBe("prefer_responses_server_tools")
   })
 })
 

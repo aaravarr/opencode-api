@@ -53,14 +53,20 @@ export function shouldEagerFallbackResponses(
 ): { eager: boolean; reason?: string } {
   if (!isObj(body)) return { eager: false };
 
+  // Server-side tools (web_search/x_search) only work on the Responses API.
+  // Prefer native responses even if lineage/history would normally eager to chat;
+  // continuity is handled by sanitize/rewrite instead of chat conversion.
+  if (opts?.preferResponsesForServerTools) {
+    return { eager: false, reason: 'prefer_responses_server_tools' };
+  }
+
   // Responses lineage always stays on native responses.
   if (opts?.preferredMode === 'responses') {
     return { eager: false, reason: 'session_lineage_responses' };
   }
 
-  // Chat lineage usually eagers to chat, but when server search tools are present
-  // (or will be injected), fall through so only foreign_* residue still forces eager.
-  if (opts?.preferredMode === 'chat' && !opts?.preferResponsesForServerTools) {
+  // Chat lineage eagers to chat when server tools are not required.
+  if (opts?.preferredMode === 'chat') {
     return { eager: true, reason: 'session_lineage_chat' };
   }
 
@@ -90,11 +96,6 @@ export function shouldEagerFallbackResponses(
   }
   if (hasPrev && !opts?.storeHit) {
     return { eager: true, reason: 'foreign_previous_response_id' };
-  }
-
-  // Chat lineage + server tools: stay on responses when no foreign residue.
-  if (opts?.preferredMode === 'chat' && opts?.preferResponsesForServerTools) {
-    return { eager: false, reason: 'prefer_responses_server_tools' };
   }
 
   return { eager: false };
