@@ -166,11 +166,12 @@ export function RequestsPage() {
         ) : !items.length ? (
           <EmptyState title="暂无请求记录" description="没有匹配当前过滤条件的请求，尝试调整搜索或过滤。" />
         ) : (
-          <Table className="min-w-[1180px]">
+          <Table className="min-w-[1280px]">
             <TableHeader className="bg-[#fafafa]">
               <TableRow>
                 <TableHead className="px-4 text-xs text-muted-foreground">时间</TableHead>
                 <TableHead className="text-xs text-muted-foreground">模型</TableHead>
+                <TableHead className="text-xs text-muted-foreground">路径</TableHead>
                 <TableHead className="text-xs text-muted-foreground">密钥</TableHead>
                 <TableHead className="text-xs text-muted-foreground">结果</TableHead>
                 <TableHead className="text-xs text-muted-foreground">服务账号</TableHead>
@@ -188,6 +189,11 @@ export function RequestsPage() {
                 <TableRow key={request.id}>
                   <TableCell className="px-4 font-mono text-xs text-muted-foreground">{formatDate(request.createdAt)}</TableCell>
                   <TableCell className="font-medium text-sm">{request.model || "未知"}</TableCell>
+                  <TableCell>
+                    <span className={`inline-flex items-center rounded-md border px-1.5 py-0.5 font-mono text-[11px] font-medium ${routeBadgeClass(formatRouteLabel(request))}`}>
+                      {formatRouteLabel(request)}
+                    </span>
+                  </TableCell>
                   <TableCell className="text-xs text-muted-foreground">{request.apiKeyName || request.apiKeyPrefix || "未记录"}</TableCell>
                   <TableCell>
                     <StatusBadge status={request.ok ? "success" : request.status != null ? "failed" : "unknown"} />
