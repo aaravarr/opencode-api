@@ -220,6 +220,7 @@ export function ImportTaskCenter({
   const [jobs, setJobs] = useState<ImportJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [collapsed, setCollapsed] = useState(false);
+  const [collapsedTouched, setCollapsedTouched] = useState(false);
   const [retrying, setRetrying] = useState<{ jobId: string; itemIndex: number } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -237,15 +238,20 @@ export function ImportTaskCenter({
       }));
       setJobs(detailed);
       setActionError(null);
+      if (!collapsedTouched) {
+        const hasActive = detailed.some((job) => job.status === "RUNNING" || job.status === "QUEUED");
+        setCollapsed(!hasActive);
+      }
     } finally {
       setLoading(false);
     }
-  }, [adminFetch, poolType]);
+  }, [adminFetch, poolType, collapsedTouched]);
 
   useEffect(() => {
+    setCollapsedTouched(false);
     setLoading(true);
     void load();
-  }, [load, version]);
+  }, [load, version, poolType]);
 
   const titleHint = useMemo(() => {
     if (poolType === "all") return "当前展示全部号池的导入任务";
@@ -291,7 +297,10 @@ export function ImportTaskCenter({
           </p>
         </div>
         <div className="flex items-center gap-1">
-          <Button variant="ghost" size="sm" onClick={() => setCollapsed((value) => !value)}>
+          <Button variant="ghost" size="sm" onClick={() => {
+            setCollapsedTouched(true);
+            setCollapsed((value) => !value);
+          }}>
             {collapsed ? <ChevronRight /> : <ChevronDown />}
             {collapsed ? "展开" : "折叠"}
           </Button>
