@@ -228,27 +228,33 @@ export interface QuotaForecastPoint {
   at: string;
   hourOffset: number;
   label: string;
-  primaryAvailablePercent: number;
-  tightestAvailablePercent: number;
+  availableAmount: number;
+  availableTokens: number | null;
+  availableCapacity: number;
   routingReadyAccounts: number;
   eligibleAccounts: number;
-  availableTokens: number | null;
+  blockedAccounts: number;
 }
 
 export interface QuotaForecastSummary {
-  nowPrimaryAvailablePercent: number;
-  laterPrimaryAvailablePercent: number;
+  metric: "tokens" | "capacity" | "accounts";
+  metricLabel: string;
+  primaryWindow: "fiveHour" | "rolling24h" | "mixed";
+  nowAvailableAmount: number;
+  laterAvailableAmount: number;
   nowRoutingReadyAccounts: number;
   laterRoutingReadyAccounts: number;
   peakRoutingReadyAccounts: number;
   peakAt: string | null;
-  primaryWindow: "fiveHour" | "rolling24h" | "mixed";
+  eligibleAccounts: number;
 }
 
 export interface QuotaForecastResult {
   generatedAt: string;
   hours: number;
   poolType: string | null;
+  metric: "tokens" | "capacity" | "accounts";
+  metricLabel: string;
   primaryWindow: "fiveHour" | "rolling24h" | "mixed";
   points: QuotaForecastPoint[];
   summary: QuotaForecastSummary;

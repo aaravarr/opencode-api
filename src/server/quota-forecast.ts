@@ -6,34 +6,43 @@ const XAI_DEFAULT_TOKEN_LIMIT = 1_000_000
 const ROLLING_WINDOW_MS = 24 * 60 * 60_000
 const HOUR_MS = 60 * 60_000
 
-export type ForecastPrimaryWindow = "fiveHour" | "rolling24h" | "mixed"
+export type ForecastMetric = "tokens" | "capacity" | "accounts"
 
 export interface QuotaForecastPoint {
   at: string
   hourOffset: number
   label: string
-  primaryAvailablePercent: number
-  tightestAvailablePercent: number
+  /** Total remaining primary-window capacity across the pool. Prefer tokens when available. */
+  availableAmount: number
+  /** Always total remaining tokens when the selected pool has token windows; otherwise null. */
+  availableTokens: number | null
+  /** Sum of primary-window remaining fractions (0..N). Useful for non-token pools. */
+  availableCapacity: number
   routingReadyAccounts: number
   eligibleAccounts: number
-  availableTokens: number | null
+  blockedAccounts: number
 }
 
 export interface QuotaForecastSummary {
-  nowPrimaryAvailablePercent: number
-  laterPrimaryAvailablePercent: number
+  metric: ForecastMetric
+  metricLabel: string
+  primaryWindow: "fiveHour" | "rolling24h" | "mixed"
+  nowAvailableAmount: number
+  laterAvailableAmount: number
   nowRoutingReadyAccounts: number
   laterRoutingReadyAccounts: number
   peakRoutingReadyAccounts: number
   peakAt: string | null
-  primaryWindow: ForecastPrimaryWindow
+  eligibleAccounts: number
 }
 
 export interface QuotaForecastResult {
   generatedAt: string
   hours: number
   poolType: string | null
-  primaryWindow: ForecastPrimaryWindow
+  metric: ForecastMetric
+  metricLabel: string
+  primaryWindow: "fiveHour" | "rolling24h" | "mixed"
   points: QuotaForecastPoint[]
   summary: QuotaForecastSummary
   notes: string[]
@@ -54,9 +63,9 @@ interface RequestTokenRow {
   tokens: number
 }
 
-function roundPercent(value: number): number {
+function round2(value: number): number {
   if (!Number.isFinite(value)) return 0
-  return Math.round(Math.max(0, Math.min(100, value)) * 100) / 100
+  return Math.round(value * 100) / 100
 }
 
 function normalizeKind(kind: string | null | undefined): string {
@@ -87,10 +96,6 @@ function isRateLimit(kind: string): boolean {
   return normalizeKind(kind) === "PROVIDER_RATE_LIMIT"
 }
 
-function primaryKindsForPool(poolType: PoolType): "rolling24h" | "fiveHour" {
-  return poolType === "xai-grok" ? "rolling24h" : "fiveHour"
-}
-
 function relevantKindsForPool(poolType: PoolType): Array<"fiveHour" | "weekly" | "monthly" | "rolling24h" | "rateLimit"> {
   if (poolType === "xai-grok") return ["rolling24h", "rateLimit"]
   if (poolType === "opencode-go") return ["fiveHour", "weekly", "monthly", "rateLimit"]
@@ -109,32 +114,42 @@ function findWindow(windows: QuotaWindowRow[], predicate: (kind: string) => bool
   return windows.find((window) => predicate(window.kind)) ?? null
 }
 
-function fixedAvailablePercent(window: QuotaWindowRow | null, atMs: number): number {
-  if (!window) return 100
-  const usage = window.usagePercent == null ? 0 : Number(window.usagePercent)
-  const remainingFromUsage = Math.max(0, 100 - usage)
-  if (usage < 100) return roundPercent(remainingFromUsage)
-
+/**
+ * Fixed windows (5h/week/month/rate-limit).
+ * Missing window is NOT treated as full remaining — that previously inflated averages
+ * when some accounts had no quota rows.
+ */
+function fixedRemainingFraction(window: QuotaWindowRow | null, atMs: number): number {
+  if (!window) return 0
+  const usage = window.usagePercent == null ? null : Number(window.usagePercent)
+  if (usage == null || !Number.isFinite(usage)) {
+    if (window.remainingValue != null && window.limitValue != null && Number(window.limitValue) > 0) {
+      return Math.max(0, Math.min(1, Number(window.remainingValue) / Number(window.limitValue)))
+    }
+    return 0
+  }
+  if (usage < 100) return Math.max(0, Math.min(1, (100 - usage) / 100))
   if (!window.resetAt) return 0
   const resetMs = Date.parse(window.resetAt)
   if (!Number.isFinite(resetMs)) return 0
-  return atMs >= resetMs ? 100 : 0
+  return atMs >= resetMs ? 1 : 0
 }
 
 function rollingAvailable(accountId: string, limitTokens: number, requests: RequestTokenRow[], atMs: number): {
-  availablePercent: number
   availableTokens: number
+  remainingFraction: number
 } {
   const windowStart = atMs - ROLLING_WINDOW_MS
   let used = 0
   for (const request of requests) {
     if (request.accountId !== accountId) continue
-    // Exclusive lower bound so a request ages out exactly 24h after it started.
     if (request.startedAtMs > windowStart && request.startedAtMs <= atMs) used += request.tokens
   }
   const availableTokens = Math.max(0, limitTokens - used)
-  const availablePercent = roundPercent((availableTokens / Math.max(1, limitTokens)) * 100)
-  return { availablePercent, availableTokens }
+  return {
+    availableTokens,
+    remainingFraction: Math.max(0, Math.min(1, availableTokens / Math.max(1, limitTokens))),
+  }
 }
 
 function hourLabel(date: Date): string {
@@ -144,24 +159,8 @@ function hourLabel(date: Date): string {
   return `${month}-${day} ${hour}:00`
 }
 
-export function buildQuotaForecast(input: {
-  ownerUserId: string
-  poolType?: string | null
-  hours?: number
-  now?: Date
-  db?: AppDatabase
-}): QuotaForecastResult {
-  const db = input.db ?? getDatabase()
-  const now = input.now ?? new Date()
-  const hours = Math.max(1, Math.min(48, Math.round(input.hours ?? 24)))
-  const poolType = input.poolType && input.poolType !== "all" ? input.poolType : null
-
-  const accountRows = poolType
-    ? db.prepare(`SELECT * FROM accounts WHERE owner_user_id=? AND pool_type=? ORDER BY ordinal, created_at`).all(input.ownerUserId, poolType)
-    : db.prepare(`SELECT * FROM accounts WHERE owner_user_id=? ORDER BY ordinal, created_at`).all(input.ownerUserId)
-
-  // Lightweight mapper without importing repository internals.
-  const accounts = (accountRows as Array<Record<string, unknown>>).map((row) => ({
+function mapAccount(row: Record<string, unknown>): AccountRecord {
+  return {
     id: String(row.id),
     ownerUserId: String(row.owner_user_id),
     name: String(row.name),
@@ -196,8 +195,26 @@ export function buildQuotaForecast(input: {
     ordinal: Number(row.ordinal),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
-  })) as AccountRecord[]
+  }
+}
 
+export function buildQuotaForecast(input: {
+  ownerUserId: string
+  poolType?: string | null
+  hours?: number
+  now?: Date
+  db?: AppDatabase
+}): QuotaForecastResult {
+  const db = input.db ?? getDatabase()
+  const now = input.now ?? new Date()
+  const hours = Math.max(1, Math.min(48, Math.round(input.hours ?? 24)))
+  const poolType = input.poolType && input.poolType !== "all" ? input.poolType : null
+
+  const accountRows = poolType
+    ? db.prepare(`SELECT * FROM accounts WHERE owner_user_id=? AND pool_type=? ORDER BY ordinal, created_at`).all(input.ownerUserId, poolType)
+    : db.prepare(`SELECT * FROM accounts WHERE owner_user_id=? ORDER BY ordinal, created_at`).all(input.ownerUserId)
+
+  const accounts = (accountRows as Array<Record<string, unknown>>).map(mapAccount)
   const eligible = accounts.filter(isBaseEligible)
   const eligibleIds = eligible.map((account) => account.id)
 
@@ -251,72 +268,90 @@ export function buildQuotaForecast(input: {
   }
 
   const poolSet = new Set(eligible.map((account) => account.poolType))
-  const primaryWindow: ForecastPrimaryWindow = poolSet.size === 0
-    ? "mixed"
+  const primaryWindow = poolSet.size === 0
+    ? "mixed" as const
     : poolSet.size === 1 && poolSet.has("xai-grok")
-      ? "rolling24h"
+      ? "rolling24h" as const
       : poolSet.has("xai-grok")
-        ? "mixed"
-        : "fiveHour"
+        ? "mixed" as const
+        : "fiveHour" as const
+
+  const hasTokenMetric = xaiIds.length > 0 && (!poolType || poolType === "xai-grok")
+  // If mixed pools include xAI, still prefer token total for the main series only when pool is pure xAI.
+  // For pure non-token pools use capacity totals (sum of remaining account fractions).
+  const metric: ForecastMetric = poolType === "xai-grok" || (hasTokenMetric && poolSet.size === 1)
+    ? "tokens"
+    : "capacity"
+  const metricLabel = metric === "tokens"
+    ? "可用 token 总量"
+    : primaryWindow === "fiveHour"
+      ? "5h 等效可用号量"
+      : "主窗口等效可用号量"
 
   const points: QuotaForecastPoint[] = []
   for (let hourOffset = 0; hourOffset <= hours; hourOffset += 1) {
     const atMs = now.getTime() + hourOffset * HOUR_MS
     const at = new Date(atMs)
-    let primarySum = 0
-    let tightestSum = 0
-    let routingReadyAccounts = 0
     let availableTokensSum = 0
     let tokenSamples = 0
+    let availableCapacity = 0
+    let routingReadyAccounts = 0
+    let blockedAccounts = 0
 
     for (const account of eligible) {
       const windows = windowsByAccount.get(account.id) ?? []
       const kinds = relevantKindsForPool(account.poolType)
-      const values: number[] = []
-
-      let primaryAvailable = 100
+      const fractions: number[] = []
+      let primaryFraction = 0
       let accountTokens: number | null = null
 
       if (account.poolType === "xai-grok") {
         const limit = limitByAccount.get(account.id) ?? XAI_DEFAULT_TOKEN_LIMIT
         const rolling = rollingAvailable(account.id, limit, requestTokens, atMs)
-        primaryAvailable = rolling.availablePercent
+        primaryFraction = rolling.remainingFraction
         accountTokens = rolling.availableTokens
-        values.push(primaryAvailable)
+        fractions.push(primaryFraction)
         const rate = findWindow(windows, isRateLimit)
-        values.push(fixedAvailablePercent(rate, atMs))
+        // Only active rate-limit rows can block; missing rate-limit means not blocked.
+        if (rate) fractions.push(fixedRemainingFraction(rate, atMs))
       } else {
         const five = findWindow(windows, isFiveHour)
         const weekly = findWindow(windows, isWeekly)
         const monthly = findWindow(windows, isMonthly)
         const rate = findWindow(windows, isRateLimit)
-        primaryAvailable = fixedAvailablePercent(five, atMs)
-        if (kinds.includes("fiveHour")) values.push(fixedAvailablePercent(five, atMs))
-        if (kinds.includes("weekly")) values.push(fixedAvailablePercent(weekly, atMs))
-        if (kinds.includes("monthly")) values.push(fixedAvailablePercent(monthly, atMs))
-        if (kinds.includes("rateLimit")) values.push(fixedAvailablePercent(rate, atMs))
+        primaryFraction = fixedRemainingFraction(five, atMs)
+        // Primary 5h window: missing => 0 remaining (avoid false fullness).
+        fractions.push(primaryFraction)
+        // Secondary windows only apply when present.
+        if (weekly) fractions.push(fixedRemainingFraction(weekly, atMs))
+        if (monthly && kinds.includes("monthly")) fractions.push(fixedRemainingFraction(monthly, atMs))
+        if (rate) fractions.push(fixedRemainingFraction(rate, atMs))
       }
 
-      const tightest = values.length ? Math.min(...values) : 100
-      primarySum += primaryAvailable
-      tightestSum += tightest
+      const tightest = fractions.length ? Math.min(...fractions) : 0
+      availableCapacity += primaryFraction
       if (tightest > 0) routingReadyAccounts += 1
+      else blockedAccounts += 1
       if (accountTokens != null) {
         availableTokensSum += accountTokens
         tokenSamples += 1
       }
     }
 
-    const eligibleAccounts = eligible.length
+    const availableAmount = metric === "tokens"
+      ? Math.round(availableTokensSum)
+      : round2(availableCapacity)
+
     points.push({
       at: at.toISOString(),
       hourOffset,
       label: hourLabel(at),
-      primaryAvailablePercent: eligibleAccounts ? roundPercent(primarySum / eligibleAccounts) : 0,
-      tightestAvailablePercent: eligibleAccounts ? roundPercent(tightestSum / eligibleAccounts) : 0,
-      routingReadyAccounts,
-      eligibleAccounts,
+      availableAmount,
       availableTokens: tokenSamples > 0 ? Math.round(availableTokensSum) : null,
+      availableCapacity: round2(availableCapacity),
+      routingReadyAccounts,
+      eligibleAccounts: eligible.length,
+      blockedAccounts,
     })
   }
 
@@ -324,31 +359,38 @@ export function buildQuotaForecast(input: {
   const laterPoint = points[points.length - 1]
   let peak = nowPoint
   for (const point of points) {
-    if (point.routingReadyAccounts > peak.routingReadyAccounts) peak = point
+    if (!peak || point.routingReadyAccounts > peak.routingReadyAccounts) peak = point
   }
 
   const notes = [
-    "主窗口：xAI 使用滚动 24h，其他号池默认 5h。",
-    "可路由账号按最紧窗口判断（任一相关窗口耗尽则不可路由）。",
-    "曲线只推演额度恢复，不预测未来新增消耗。",
+    metric === "tokens"
+      ? "主曲线为号池可用 token 总量（滚动 24h 余量求和）。"
+      : "主曲线为号池主窗口等效可用号量（每个号 0~1，按剩余比例求和，不是平均值）。",
+    "绿色阶梯线是预计可路由账号数（最紧窗口仍有剩余才计入）。",
+    "只推演额度恢复，不预测未来新增消耗。",
+    "缺少额度窗口数据的账号按 0 剩余处理，避免虚高。",
   ]
   if (!eligible.length) notes.push("当前没有可用于预测的账号。")
-  if (primaryWindow === "mixed") notes.push("混合号池下主曲线是各账号主窗口可用率的均值。")
 
   return {
     generatedAt: now.toISOString(),
     hours,
     poolType,
+    metric,
+    metricLabel,
     primaryWindow,
     points,
     summary: {
-      nowPrimaryAvailablePercent: nowPoint?.primaryAvailablePercent ?? 0,
-      laterPrimaryAvailablePercent: laterPoint?.primaryAvailablePercent ?? 0,
+      metric,
+      metricLabel,
+      primaryWindow,
+      nowAvailableAmount: nowPoint?.availableAmount ?? 0,
+      laterAvailableAmount: laterPoint?.availableAmount ?? 0,
       nowRoutingReadyAccounts: nowPoint?.routingReadyAccounts ?? 0,
       laterRoutingReadyAccounts: laterPoint?.routingReadyAccounts ?? 0,
       peakRoutingReadyAccounts: peak?.routingReadyAccounts ?? 0,
       peakAt: peak?.at ?? null,
-      primaryWindow,
+      eligibleAccounts: eligible.length,
     },
     notes,
   }
