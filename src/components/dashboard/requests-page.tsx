@@ -18,6 +18,28 @@ const pageSize = 20;
 
 interface AccountsResponse { items?: { id: string; poolType?: string }[]; accounts?: { id: string; poolType?: string }[] }
 
+
+function formatRouteLabel(request: RequestRecord): string {
+  const inbound = request.inboundEndpoint || (request.endpoint ? `v1/${request.endpoint}` : "—")
+  const upstream = request.upstreamEndpoint || request.endpoint || "—"
+  if (request.converted || (inbound.includes("responses") && String(upstream).includes("chat/completions"))) {
+    return `${inbound} → ${upstream}`
+  }
+  if (inbound !== `v1/${upstream}` && inbound !== upstream) {
+    return `${inbound} · ${upstream}`
+  }
+  return inbound
+}
+
+function formatTransformLabel(request: RequestRecord): string {
+  if (request.transformSummary) return request.transformSummary
+  if (request.converted) return `converted${request.routeReason ? ` · ${request.routeReason}` : ""}`
+  if (request.processMode === "raw") return "raw passthrough"
+  if (request.routeMode === "responses") return request.routeReason || "responses-native"
+  if (request.routeMode === "chat") return request.routeReason || "chat"
+  return request.processMode || "—"
+}
+
 export function RequestsPage() {
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState<"all" | "success" | "fail">("all");
@@ -118,11 +140,13 @@ export function RequestsPage() {
         ) : !items.length ? (
           <EmptyState title="暂无请求记录" description="没有匹配当前过滤条件的请求，尝试调整搜索或过滤。" />
         ) : (
-          <Table className="min-w-[1180px]">
+          <Table className="min-w-[1480px]">
             <TableHeader className="bg-[#fafafa]">
               <TableRow>
                 <TableHead className="px-4 text-xs text-muted-foreground">时间</TableHead>
                 <TableHead className="text-xs text-muted-foreground">模型</TableHead>
+                <TableHead className="text-xs text-muted-foreground">端点</TableHead>
+                <TableHead className="text-xs text-muted-foreground">转换</TableHead>
                 <TableHead className="text-xs text-muted-foreground">密钥</TableHead>
                 <TableHead className="text-xs text-muted-foreground">结果</TableHead>
                 <TableHead className="text-xs text-muted-foreground">服务账号</TableHead>
@@ -140,6 +164,15 @@ export function RequestsPage() {
                 <TableRow key={request.id}>
                   <TableCell className="px-4 font-mono text-xs text-muted-foreground">{formatDate(request.createdAt)}</TableCell>
                   <TableCell className="font-medium text-sm">{request.model || "未知"}</TableCell>
+                  <TableCell className="max-w-[220px] truncate font-mono text-[11px] text-muted-foreground" title={formatRouteLabel(request)}>
+                    {formatRouteLabel(request)}
+                  </TableCell>
+                  <TableCell className="max-w-[240px] truncate font-mono text-[11px]" title={formatTransformLabel(request)}>
+                    <span className={request.converted ? "text-amber-700" : "text-muted-foreground"}>
+                      {request.converted ? "已转换" : (request.processMode === "raw" ? "原生" : "处理")}
+                      {request.routeReason ? ` · ${request.routeReason}` : ""}
+                    </span>
+                  </TableCell>
                   <TableCell className="text-xs text-muted-foreground">{request.apiKeyName || request.apiKeyPrefix || "未记录"}</TableCell>
                   <TableCell>
                     <StatusBadge status={request.ok ? "success" : request.status != null ? "failed" : "unknown"} />
@@ -267,7 +300,13 @@ function BasicInfo({ request, poolType }: { request: RequestDetail["request"]; p
   const rows: Array<[string, string]> = [
     ["密钥", request.apiKeyName || request.apiKeyPrefix || "—"],
     ["__account__", request.accountName || "—"],
-    ["Endpoint", request.endpoint || "—"],
+    ["客户端端点", request.inboundEndpoint || (request.endpoint ? `v1/${request.endpoint}` : "—")],
+    ["实际上游", request.upstreamEndpoint || request.endpoint || "—"],
+    ["处理模式", request.processMode || "—"],
+    ["路由模式", request.routeMode || "—"],
+    ["是否转换", request.converted ? "是" : "否"],
+    ["转换原因", request.routeReason || "—"],
+    ["转换摘要", request.transformSummary || "—"],
     ["Stream", request.stream ? "是" : "否"],
     ["HTTP 状态", request.status != null ? String(request.status) : "—"],
     ["结果", request.outcome || (request.ok ? "success" : "fail")],
@@ -286,7 +325,7 @@ function BasicInfo({ request, poolType }: { request: RequestDetail["request"]; p
       <h3 className="mb-3 text-sm font-medium">基本信息</h3>
       <div className="grid gap-x-4 gap-y-2 sm:grid-cols-2">
         {rows.map(([label, value]) => (
-          <div key={label} className="grid grid-cols-[88px_minmax(0,1fr)] items-center gap-2 text-xs">
+          <div key={label} className="grid grid-cols-[96px_minmax(0,1fr)] items-center gap-2 text-xs">
             <span className="text-muted-foreground">{label === "__account__" ? "服务账号" : label}</span>
             <span className="inline-flex items-center gap-1.5 truncate font-mono" title={value}>
               {value}

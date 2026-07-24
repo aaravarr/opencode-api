@@ -35,6 +35,13 @@ interface RequestRow {
   error: string | null;
   request_size_bytes: number | null;
   response_size_bytes: number | null;
+  inbound_endpoint: string | null;
+  upstream_endpoint: string | null;
+  process_mode: string | null;
+  route_mode: string | null;
+  route_reason: string | null;
+  converted: number | null;
+  transform_summary: string | null;
 }
 
 interface BodyRow {
@@ -71,7 +78,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
   if (user instanceof Response) return user;
   const { id } = await context.params;
   const db = getDatabase();
-  const row = db.prepare("SELECT g.id,g.endpoint,g.model,g.status,g.outcome,g.ok,g.stream,g.api_key_prefix,k.name AS api_key_name,g.account_id,g.account_name,g.attempt_count,g.started_at,g.completed_at,g.latency_ms,g.local_prep_ms,g.first_token_ms,g.prompt_tokens,g.completion_tokens,g.total_tokens,g.cached_tokens,g.reasoning_tokens,g.text_tokens,g.image_tokens,g.audio_tokens,g.client,g.user_agent,g.origin,g.error,g.request_size_bytes,g.response_size_bytes FROM gateway_requests g LEFT JOIN api_keys k ON k.id=g.api_key_id WHERE g.id=? AND g.owner_user_id=?").get(id, user.id) as RequestRow | undefined;
+  const row = db.prepare("SELECT g.id,g.endpoint,g.model,g.status,g.outcome,g.ok,g.stream,g.api_key_prefix,k.name AS api_key_name,g.account_id,g.account_name,g.attempt_count,g.started_at,g.completed_at,g.latency_ms,g.local_prep_ms,g.first_token_ms,g.prompt_tokens,g.completion_tokens,g.total_tokens,g.cached_tokens,g.reasoning_tokens,g.text_tokens,g.image_tokens,g.audio_tokens,g.client,g.user_agent,g.origin,g.error,g.request_size_bytes,g.response_size_bytes,g.inbound_endpoint,g.upstream_endpoint,g.process_mode,g.route_mode,g.route_reason,g.converted,g.transform_summary FROM gateway_requests g LEFT JOIN api_keys k ON k.id=g.api_key_id WHERE g.id=? AND g.owner_user_id=?").get(id, user.id) as RequestRow | undefined;
   if (!row) return Response.json({ error: { type: "not_found", message: "请求不存在" } }, { status: 404 });
   const body = db.prepare("SELECT request_body_json,response_body_json,request_headers_json,request_truncated,response_truncated,has_request,has_response FROM request_bodies WHERE request_id=?").get(id) as BodyRow | undefined;
   const attempts = db.prepare("SELECT id,account_id,account_name,attempt_number,status,decision,error_type,error_message,latency_ms,started_at,completed_at FROM gateway_attempts WHERE request_id=? ORDER BY attempt_number").all(id) as AttemptRow[];
@@ -115,6 +122,13 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       localPrepMs: row.local_prep_ms,
       requestSizeBytes: row.request_size_bytes,
       responseSizeBytes: row.response_size_bytes,
+      inboundEndpoint: row.inbound_endpoint,
+      upstreamEndpoint: row.upstream_endpoint,
+      processMode: row.process_mode,
+      routeMode: row.route_mode,
+      routeReason: row.route_reason,
+      converted: row.converted === 1,
+      transformSummary: row.transform_summary,
       request: parseJson(body?.request_body_json ?? null),
       requestTruncated: body?.request_truncated === 1,
       response: parseJson(body?.response_body_json ?? null),

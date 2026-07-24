@@ -386,6 +386,13 @@ function ensureCurrentGatewayRequestColumns(db: AppDatabase): void {
     ["text_tokens", "INTEGER"],
     ["image_tokens", "INTEGER"],
     ["audio_tokens", "INTEGER"],
+    ["inbound_endpoint", "TEXT"],
+    ["upstream_endpoint", "TEXT"],
+    ["process_mode", "TEXT"],
+    ["route_mode", "TEXT"],
+    ["route_reason", "TEXT"],
+    ["converted", "INTEGER NOT NULL DEFAULT 0"],
+    ["transform_summary", "TEXT"],
   ] as const
   for (const [name, definition] of requestAdditions) {
     if (!requestCols.has(name)) db.exec(`ALTER TABLE gateway_requests ADD COLUMN ${name} ${definition}`)

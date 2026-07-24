@@ -33,6 +33,13 @@ interface RequestRow {
   error: string | null;
   has_request: number | null;
   has_response: number | null;
+  inbound_endpoint: string | null;
+  upstream_endpoint: string | null;
+  process_mode: string | null;
+  route_mode: string | null;
+  route_reason: string | null;
+  converted: number | null;
+  transform_summary: string | null;
 }
 
 function mapRequest(row: RequestRow) {
@@ -74,6 +81,13 @@ function mapRequest(row: RequestRow) {
     hasResponse: row.has_response === 1,
     client: row.client,
     error: row.error,
+    inboundEndpoint: row.inbound_endpoint,
+    upstreamEndpoint: row.upstream_endpoint,
+    processMode: row.process_mode,
+    routeMode: row.route_mode,
+    routeReason: row.route_reason,
+    converted: row.converted === 1,
+    transformSummary: row.transform_summary,
     tps,
   };
 }
@@ -105,12 +119,12 @@ export function GET(request: Request): Response {
     if (Number.isFinite(statusNum)) { conditions.push("g.status = ?"); params.push(statusNum) }
   }
   if (model) { conditions.push("g.model LIKE ?"); params.push(`%${model}%`) }
-  if (q) { conditions.push("(g.endpoint LIKE ? OR g.error LIKE ?)"); params.push(`%${q}%`, `%${q}%`) }
+  if (q) { conditions.push("(g.endpoint LIKE ? OR g.inbound_endpoint LIKE ? OR g.upstream_endpoint LIKE ? OR g.route_mode LIKE ? OR g.route_reason LIKE ? OR g.transform_summary LIKE ? OR g.error LIKE ?)"); params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`) }
 
   const db = getDatabase();
   const where = conditions.join(" AND ");
   const total = Number((db.prepare(`SELECT COUNT(*) AS value FROM gateway_requests g WHERE ${where}`).get(...params) as { value: number }).value);
-  const rows = db.prepare(`SELECT g.id,g.endpoint,g.model,g.status,g.outcome,g.ok,g.stream,g.api_key_prefix,k.name AS api_key_name,g.account_id,g.account_name,g.attempt_count,g.started_at,g.completed_at,g.latency_ms,g.local_prep_ms,g.first_token_ms,g.prompt_tokens,g.completion_tokens,g.total_tokens,g.cached_tokens,g.reasoning_tokens,g.text_tokens,g.image_tokens,g.audio_tokens,g.client,g.error,rb.has_request,rb.has_response FROM gateway_requests g LEFT JOIN request_bodies rb ON rb.request_id = g.id LEFT JOIN api_keys k ON k.id = g.api_key_id WHERE ${where} ORDER BY g.started_at DESC LIMIT ? OFFSET ?`)
+  const rows = db.prepare(`SELECT g.id,g.endpoint,g.model,g.status,g.outcome,g.ok,g.stream,g.api_key_prefix,k.name AS api_key_name,g.account_id,g.account_name,g.attempt_count,g.started_at,g.completed_at,g.latency_ms,g.local_prep_ms,g.first_token_ms,g.prompt_tokens,g.completion_tokens,g.total_tokens,g.cached_tokens,g.reasoning_tokens,g.text_tokens,g.image_tokens,g.audio_tokens,g.client,g.error,g.inbound_endpoint,g.upstream_endpoint,g.process_mode,g.route_mode,g.route_reason,g.converted,g.transform_summary,rb.has_request,rb.has_response FROM gateway_requests g LEFT JOIN request_bodies rb ON rb.request_id = g.id LEFT JOIN api_keys k ON k.id = g.api_key_id WHERE ${where} ORDER BY g.started_at DESC LIMIT ? OFFSET ?`)
     .all(...params, pageSize, (page - 1) * pageSize) as RequestRow[];
   return Response.json({ items: rows.map(mapRequest), total, page, pageSize });
 }

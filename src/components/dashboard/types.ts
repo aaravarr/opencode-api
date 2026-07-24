@@ -124,6 +124,13 @@ export interface RequestRecord {
   hasResponse?: boolean;
   client?: string | null;
   error?: string | null;
+  inboundEndpoint?: string | null;
+  upstreamEndpoint?: string | null;
+  processMode?: string | null;
+  routeMode?: string | null;
+  routeReason?: string | null;
+  converted?: boolean;
+  transformSummary?: string | null;
 }
 
 export interface AttemptDetail {

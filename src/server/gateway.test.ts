@@ -265,6 +265,13 @@ describe("gateway logging", () => {
     const response = await new GatewayService(credentials, db, fetcher, hasher).handle(req, "responses")
     expect(response.status).toBe(200)
     expect(sent.tools).toEqual(expect.arrayContaining([{ type: "web_search" }, { type: "x_search" }]))
+    const row = db.prepare("SELECT inbound_endpoint,upstream_endpoint,process_mode,route_mode,route_reason,converted,transform_summary FROM gateway_requests ORDER BY started_at DESC LIMIT 1").get() as any
+    expect(row.inbound_endpoint).toBe("v1/responses")
+    expect(row.upstream_endpoint).toBe("responses")
+    expect(row.process_mode).toBe("processed")
+    expect(row.route_mode).toBe("responses")
+    expect(row.converted).toBe(0)
+    expect(String(row.transform_summary || "")).toContain("responses-native")
   })
 
   it("raw responses does not inject default server tools", async () => {
@@ -282,6 +289,12 @@ describe("gateway logging", () => {
     const response = await new GatewayService(credentials, db, fetcher, hasher).handle(req, "responses", { raw: true })
     expect(response.status).toBe(200)
     expect(sent.tools).toBeUndefined()
+    const row = db.prepare("SELECT inbound_endpoint,upstream_endpoint,process_mode,route_mode,converted,transform_summary FROM gateway_requests ORDER BY started_at DESC LIMIT 1").get() as any
+    expect(row.inbound_endpoint).toBe("raw/v1/responses")
+    expect(row.upstream_endpoint).toBe("responses")
+    expect(row.process_mode).toBe("raw")
+    expect(row.converted).toBe(0)
+    expect(String(row.transform_summary || "")).toContain("raw")
   })
   it("Grok responses stay on native path with injected server tools even if previous_response_id is foreign", async () => {
     const { db, apiKey, credentials, hasher } = setup("xai-grok")

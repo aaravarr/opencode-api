@@ -40,6 +40,13 @@ interface RequestFinalizeInput {
   responseBody?: unknown
   responseTruncated?: boolean
   meta?: { headers: Record<string, string> }
+  inboundEndpoint?: string | null
+  upstreamEndpoint?: string | null
+  processMode?: string | null
+  routeMode?: string | null
+  routeReason?: string | null
+  converted?: number
+  transformSummary?: string | null
 }
 
 async function readRequestBody(request: Request): Promise<Uint8Array<ArrayBuffer> | null> {
@@ -315,10 +322,40 @@ export class GatewayService {
     }
 
     const chatFallbackUsed = processResponses && responsesRoute === "chat"
+    const inboundEndpoint = options?.raw ? `raw/v1/${endpoint}` : `v1/${endpoint}`
+    const processMode = options?.raw ? "raw" : (processResponses || processChat ? "processed" : "passthrough")
+    const routeMode = processResponses ? responsesRoute : (endpoint === "chat/completions" ? "chat" : endpoint === "responses" ? "responses" : endpoint)
+    const routeReason = processResponses
+      ? (responsesRouteReason || (responsesRoute === "chat" ? "chat_fallback" : "responses_native"))
+      : (options?.raw ? "raw_passthrough" : "direct")
+    const converted = Number(chatFallbackUsed)
+    const transformParts: string[] = []
+    if (options?.raw) transformParts.push("raw")
+    if (processResponses) {
+      transformParts.push(responsesRoute === "chat" ? "responses->chat" : "responses-native")
+      if (responsesProcessMeta?.injectedTools) transformParts.push("inject:web_search+x_search")
+      if (responsesProcessMeta?.sanitized) transformParts.push("sanitize-input")
+      if (responsesProcessMeta?.rewritten) transformParts.push("rewrite-continuity")
+      if (responsesRoute === "responses") transformParts.push("remap-codex")
+      if (responsesRoute === "chat") transformParts.push("chat-to-responses")
+    } else if (processChat) {
+      transformParts.push("chat-normalize")
+    }
+    if (routeReason) transformParts.push(`reason:${routeReason}`)
+    const transformSummary = transformParts.join(" | ")
+    const routeMeta = {
+      inboundEndpoint,
+      upstreamEndpoint: effectiveEndpoint,
+      processMode,
+      routeMode,
+      routeReason,
+      converted,
+      transformSummary,
+    }
     const routing = new RoutingService(apiKey.ownerUserId, this.db)
     routing.setModel(model)
-    this.db.prepare("INSERT INTO gateway_requests(id,owner_user_id,api_key_id,endpoint,model,started_at,stream,api_key_prefix,client,user_agent,origin,request_size_bytes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
-      .run(requestId, apiKey.ownerUserId, apiKey.id, endpoint, model, new Date().toISOString(), Number(stream), apiKey.prefix, meta.client, meta.userAgent, meta.origin, requestBytes?.byteLength ?? 0)
+    this.db.prepare("INSERT INTO gateway_requests(id,owner_user_id,api_key_id,endpoint,model,started_at,stream,api_key_prefix,client,user_agent,origin,request_size_bytes,inbound_endpoint,upstream_endpoint,process_mode,route_mode,route_reason,converted,transform_summary) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(requestId, apiKey.ownerUserId, apiKey.id, endpoint, model, new Date().toISOString(), Number(stream), apiKey.prefix, meta.client, meta.userAgent, meta.origin, requestBytes?.byteLength ?? 0, inboundEndpoint, effectiveEndpoint, processMode, routeMode, routeReason, converted, transformSummary)
     const tried = new Set<string>()
     const permanentlyDisabled = new Set<string>()
     let attemptNumber = 0
@@ -331,7 +368,7 @@ export class GatewayService {
           const status = exhausted ? 429 : 503
           const headers = exhausted && cause.retryAfterSeconds ? { "retry-after": String(cause.retryAfterSeconds) } : undefined
           const type = exhausted ? "all_provider_accounts_limited" : "no_eligible_account"
-          this.finalizeRequest(requestId, { status, outcome: type, attempts: attemptNumber, ok: 0, latencyMs: Date.now() - t0, localPrepMs: 0, error: type, logSettings, requestBodyJson, meta })
+          this.finalizeRequest(requestId, { status, outcome: type, attempts: attemptNumber, ok: 0, latencyMs: Date.now() - t0, localPrepMs: 0, error: type, logSettings, requestBodyJson, meta, ...routeMeta })
           return Response.json({ error: { type, message: exhausted ? "All eligible provider accounts are temporarily rate-limited or quota-limited." : "No eligible provider account is available.", ...(cause.retryAfterSeconds ? { retry_after: cause.retryAfterSeconds } : {}) } }, { status, headers })
         }
         throw cause
@@ -401,7 +438,7 @@ export class GatewayService {
           const bodyError = extractBodyError(parsed) ?? null
           const status = upstream.status
           this.finishAttempt(attemptId, status, "RETURN_DIRECTLY", type, Date.now() - attemptStartedAt, bodyError, selection.account.name)
-          this.finalizeRequest(requestId, { status, outcome: type ?? "upstream_error", attempts: attemptNumber, ok: isLogOk(status, bodyError) ? 1 : 0, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, error: bodyError, accountId: selection.account.id, accountName: selection.account.name, responseSizeBytes: body.length, usage: extractUsage(parsed), logSettings, requestBodyJson, responseBody: parsed, responseTruncated: false, meta })
+          this.finalizeRequest(requestId, { status, outcome: type ?? "upstream_error", attempts: attemptNumber, ok: isLogOk(status, bodyError) ? 1 : 0, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, error: bodyError, accountId: selection.account.id, accountName: selection.account.name, responseSizeBytes: body.length, usage: extractUsage(parsed), logSettings, requestBodyJson, responseBody: parsed, responseTruncated: false, meta, ...routeMeta })
           return new Response(body, { status, headers: responseHeaders(upstream.headers) })
         }
 
@@ -437,7 +474,7 @@ export class GatewayService {
               const latencyMs = Date.now() - t0
               const firstTokenMs = firstTokenAt - upstreamStartedAt
               this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, r.error ?? null, selection.account.name)
-              this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: isLogOk(status, r.error) ? 1 : 0, latencyMs, localPrepMs: upstreamStartedAt - t0, firstTokenMs, usage: r.usage, error: r.error, accountId: selection.account.id, accountName: selection.account.name, responseSizeBytes: r.responseBytes ?? null, logSettings, requestBodyJson, responseBody: r.response, responseTruncated: r.responseTruncated, meta })
+              this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: isLogOk(status, r.error) ? 1 : 0, latencyMs, localPrepMs: upstreamStartedAt - t0, firstTokenMs, usage: r.usage, error: r.error, accountId: selection.account.id, accountName: selection.account.name, responseSizeBytes: r.responseBytes ?? null, logSettings, requestBodyJson, responseBody: r.response, responseTruncated: r.responseTruncated, meta, ...routeMeta })
             }
             let outStream: ReadableStream<Uint8Array> = teeAndCapture(rebuilt, (r) => {
               onComplete(r)
@@ -467,7 +504,7 @@ export class GatewayService {
             return new Response(outStream, { status, headers })
           }
           this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, null, selection.account.name)
-          this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: 1, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta })
+          this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: 1, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta, ...routeMeta })
           let outStream: ReadableStream<Uint8Array> = rebuilt
           if (chatFallbackUsed) outStream = convertChatStreamToResponses(outStream, responsesModelHint, responsesToolContext)
           else if (processResponses && responsesToolContext) outStream = remapResponsesSuccessStream(outStream, responsesToolContext)
@@ -548,12 +585,12 @@ export class GatewayService {
             const onComplete = (r: CaptureResult) => {
               const latencyMs = Date.now() - t0
               this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, r.error ?? null, selection.account.name)
-              this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: isLogOk(status, r.error) ? 1 : 0, latencyMs, localPrepMs: upstreamStartedAt - t0, usage: r.usage, error: r.error, accountId: selection.account.id, accountName: selection.account.name, responseSizeBytes: r.responseBytes ?? outBytes.byteLength, logSettings, requestBodyJson, responseBody: r.response ?? remappedJson, responseTruncated: r.responseTruncated, meta })
+              this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: isLogOk(status, r.error) ? 1 : 0, latencyMs, localPrepMs: upstreamStartedAt - t0, usage: r.usage, error: r.error, accountId: selection.account.id, accountName: selection.account.name, responseSizeBytes: r.responseBytes ?? outBytes.byteLength, logSettings, requestBodyJson, responseBody: r.response ?? remappedJson, responseTruncated: r.responseTruncated, meta, ...routeMeta })
             }
             return new Response(captureJsonResponse(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(outBytes); controller.close() } }), onComplete), { status, headers })
           }
           this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, null, selection.account.name)
-          this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: 1, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta })
+          this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: 1, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta, ...routeMeta })
           return new Response(outBytes, { status, headers })
         }
 
@@ -561,17 +598,17 @@ export class GatewayService {
           const onComplete = (r: CaptureResult) => {
             const latencyMs = Date.now() - t0
             this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, r.error ?? null, selection.account.name)
-            this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: isLogOk(status, r.error) ? 1 : 0, latencyMs, localPrepMs: upstreamStartedAt - t0, usage: r.usage, error: r.error, accountId: selection.account.id, accountName: selection.account.name, responseSizeBytes: r.responseBytes ?? null, logSettings, requestBodyJson, responseBody: r.response, responseTruncated: r.responseTruncated, meta })
+            this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: isLogOk(status, r.error) ? 1 : 0, latencyMs, localPrepMs: upstreamStartedAt - t0, usage: r.usage, error: r.error, accountId: selection.account.id, accountName: selection.account.name, responseSizeBytes: r.responseBytes ?? null, logSettings, requestBodyJson, responseBody: r.response, responseTruncated: r.responseTruncated, meta, ...routeMeta })
           }
           return new Response(captureJsonResponse(upstream.body, onComplete), { status, headers: responseHeaders(upstream.headers) })
         }
         this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, null, selection.account.name)
-        this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: 1, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta })
+        this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: 1, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta, ...routeMeta })
         return new Response(upstream.body, { status, headers: responseHeaders(upstream.headers) })
       } catch (cause) {
         const message = formatErrorDetail(cause)
         this.finishAttempt(attemptId, 502, "RETURN_DIRECTLY", "NETWORK", Date.now() - attemptStartedAt, message, selection.account.name)
-        this.finalizeRequest(requestId, { status: 502, outcome: "NETWORK", attempts: attemptNumber, ok: 0, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, error: message, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta })
+        this.finalizeRequest(requestId, { status: 502, outcome: "NETWORK", attempts: attemptNumber, ok: 0, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, error: message, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta, ...routeMeta })
         return Response.json({ error: { type: "upstream_transport_error", message } }, { status: 502 })
       } finally { routing.releaseLease(selection.leaseId) }
     }
@@ -584,12 +621,13 @@ export class GatewayService {
 
   private finalizeRequest(id: string, input: RequestFinalizeInput): void {
     const usage = input.usage ?? {}
-    this.db.prepare(`UPDATE gateway_requests SET status=?,outcome=?,attempt_count=?,completed_at=?,ok=?,latency_ms=?,local_prep_ms=?,first_token_ms=?,error=?,account_id=?,account_name=?,response_size_bytes=?,prompt_tokens=?,completion_tokens=?,total_tokens=?,cached_tokens=?,reasoning_tokens=?,text_tokens=?,image_tokens=?,audio_tokens=? WHERE id=?`)
+    this.db.prepare(`UPDATE gateway_requests SET status=?,outcome=?,attempt_count=?,completed_at=?,ok=?,latency_ms=?,local_prep_ms=?,first_token_ms=?,error=?,account_id=?,account_name=?,response_size_bytes=?,prompt_tokens=?,completion_tokens=?,total_tokens=?,cached_tokens=?,reasoning_tokens=?,text_tokens=?,image_tokens=?,audio_tokens=?,inbound_endpoint=COALESCE(?,inbound_endpoint),upstream_endpoint=COALESCE(?,upstream_endpoint),process_mode=COALESCE(?,process_mode),route_mode=COALESCE(?,route_mode),route_reason=COALESCE(?,route_reason),converted=COALESCE(?,converted),transform_summary=COALESCE(?,transform_summary) WHERE id=?`)
       .run(
         input.status, input.outcome, input.attempts, new Date().toISOString(),
         input.ok ?? 0, input.latencyMs ?? null, input.localPrepMs ?? null, input.firstTokenMs ?? null, truncateError(input.error),
         input.accountId ?? null, input.accountName ?? null, input.responseSizeBytes ?? null,
         usage.promptTokens ?? null, usage.completionTokens ?? null, usage.totalTokens ?? null, usage.cachedTokens ?? null, usage.reasoningTokens ?? null, usage.textTokens ?? null, usage.imageTokens ?? null, usage.audioTokens ?? null,
+        input.inboundEndpoint ?? null, input.upstreamEndpoint ?? null, input.processMode ?? null, input.routeMode ?? null, input.routeReason ?? null, input.converted ?? null, input.transformSummary ?? null,
         id,
       )
     // xAI free tier headers are often stale (remaining always 1M). After a
