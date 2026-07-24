@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Clock3, LoaderCircle, RefreshCw, RotateCcw, XCircle } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
@@ -219,8 +219,8 @@ export function ImportTaskCenter({
   const { adminFetch } = useAdmin();
   const [jobs, setJobs] = useState<ImportJob[]>([]);
   const [loading, setLoading] = useState(true);
-  const [collapsed, setCollapsed] = useState(false);
-  const [collapsedTouched, setCollapsedTouched] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
+  const collapsedTouchedRef = useRef(false);
   const [retrying, setRetrying] = useState<{ jobId: string; itemIndex: number } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -238,17 +238,20 @@ export function ImportTaskCenter({
       }));
       setJobs(detailed);
       setActionError(null);
-      if (!collapsedTouched) {
+      // Only auto-collapse/expand when the user has not manually toggled.
+      // Use a ref so this does not recreate `load` and retrigger effects.
+      if (!collapsedTouchedRef.current) {
         const hasActive = detailed.some((job) => job.status === "RUNNING" || job.status === "QUEUED");
         setCollapsed(!hasActive);
       }
     } finally {
       setLoading(false);
     }
-  }, [adminFetch, poolType, collapsedTouched]);
+  }, [adminFetch, poolType]);
 
+  // Reset auto-collapse policy when switching pool/version, then reload.
   useEffect(() => {
-    setCollapsedTouched(false);
+    collapsedTouchedRef.current = false;
     setLoading(true);
     void load();
   }, [load, version, poolType]);
@@ -298,7 +301,7 @@ export function ImportTaskCenter({
         </div>
         <div className="flex items-center gap-1">
           <Button variant="ghost" size="sm" onClick={() => {
-            setCollapsedTouched(true);
+            collapsedTouchedRef.current = true;
             setCollapsed((value) => !value);
           }}>
             {collapsed ? <ChevronRight /> : <ChevronDown />}
