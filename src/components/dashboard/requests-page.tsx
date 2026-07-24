@@ -41,27 +41,29 @@ function hasInjectedServerTools(request: RequestRecord): boolean {
   return String(request.transformSummary || "").includes("inject:web_search+x_search")
 }
 
-function explainRouteStory(request: RequestRecord): string {
-  const route = formatRouteLabel(request)
-  const injected = hasInjectedServerTools(request)
-  const reason = String(request.routeReason || "")
+function routeBadgeClass(label: string): string {
+  if (label.includes("→")) return "border-amber-200 bg-amber-50 text-amber-800"
+  if (label.includes("raw")) return "border-slate-200 bg-slate-50 text-slate-700"
+  if (label === "chat") return "border-sky-200 bg-sky-50 text-sky-800"
+  if (label === "responses") return "border-emerald-200 bg-emerald-50 text-emerald-800"
+  return "border-border bg-white text-muted-foreground"
+}
 
-  if (request.processMode === "raw" || route.includes("raw/")) return "原生透传，未改写。"
-  if (route === "responses → chat" || request.converted) {
-    if (reason.startsWith("foreign_previous_response_id")) return "Responses → Chat：本地没有对应会话历史。"
-    if (reason.startsWith("foreign_opaque") || reason.startsWith("foreign_history")) return "Responses → Chat：历史状态无法安全复用。"
-    if (reason === "session_lineage_chat") return "Responses → Chat：该会话此前走 Chat。"
-    return "Responses → Chat：兼容回退。"
-  }
-  if (route === "responses") {
-    if (reason === "prefer_responses_server_tools") {
-      return injected ? "走 Responses，并注入了搜索工具。" : "走 Responses，保留服务端搜索工具。"
-    }
-    if (injected) return "走 Responses，并注入了搜索工具。"
-    return "走 Responses。"
-  }
-  if (route === "chat") return "走 Chat。"
-  return `路径：${route}`
+/** 只翻译 routeReason 技术码，不替代转换过程展示。 */
+function explainRouteReason(reason?: string | null): string {
+  const r = String(reason || "").trim()
+  if (!r) return "—"
+  if (r === "prefer_responses_server_tools") return "为保留服务端搜索工具，强制走 Responses"
+  if (r === "responses_native") return "正常走 Responses"
+  if (r === "responses_compact") return "compact 请求，固定走 Responses"
+  if (r === "session_lineage_responses") return "会话此前走 Responses，继续沿用"
+  if (r === "session_lineage_chat") return "会话此前走 Chat，继续回退 Chat"
+  if (r.startsWith("foreign_previous_response_id")) return "本地没有对应会话历史，回退 Chat"
+  if (r.startsWith("foreign_opaque") || r.startsWith("foreign_history")) return "历史状态无法安全复用，回退 Chat"
+  if (r === "raw_passthrough") return "原生透传"
+  if (r === "direct") return "直接转发"
+  if (r === "chat_fallback") return "Responses 回退到 Chat"
+  return r
 }
 
 export function RequestsPage() {
@@ -311,11 +313,26 @@ function RequestDetailSheet({ request, onOpenChange, poolType }: { request: Requ
 }
 
 function RouteTransformPanel({ request }: { request: RequestDetail["request"] }) {
+  const route = formatRouteLabel(request)
+  const injected = hasInjectedServerTools(request)
   return (
     <div className="rounded-md border bg-[#fafafa] p-3">
-      <h3 className="mb-1 text-sm font-medium">路由说明</h3>
-      <p className="text-sm text-foreground">{explainRouteStory(request)}</p>
-      <p className="mt-1 font-mono text-xs text-muted-foreground">{request.model || "—"} · {formatRouteLabel(request)}</p>
+      <h3 className="mb-3 text-sm font-medium">路由与转换</h3>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={`inline-flex items-center rounded-md border px-2 py-1 font-mono text-xs font-medium ${routeBadgeClass(route)}`}>
+          {route}
+        </span>
+        <span className={`inline-flex items-center rounded-md border px-2 py-1 text-xs ${request.converted ? "border-amber-200 bg-amber-50 text-amber-800" : "border-border bg-white text-muted-foreground"}`}>
+          {request.converted ? "已转换" : "未转换"}
+        </span>
+        <span className={`inline-flex items-center rounded-md border px-2 py-1 text-xs ${injected ? "border-violet-200 bg-violet-50 text-violet-800" : "border-border bg-white text-muted-foreground"}`}>
+          {injected ? "已注入 web_search + x_search" : "未注入内置工具"}
+        </span>
+        <span className="inline-flex items-center rounded-md border border-border bg-white px-2 py-1 font-mono text-xs text-muted-foreground">
+          {request.model || "—"}
+        </span>
+      </div>
+      <p className="mt-2 text-sm text-foreground">原因：{explainRouteReason(request.routeReason)}</p>
     </div>
   )
 }
@@ -325,6 +342,10 @@ function BasicInfo({ request, poolType }: { request: RequestDetail["request"]; p
     ["密钥", request.apiKeyName || request.apiKeyPrefix || "—"],
     ["__account__", request.accountName || "—"],
     ["模型", request.model || "—"],
+    ["转换路径", formatRouteLabel(request)],
+    ["是否转换", request.converted ? "是" : "否"],
+    ["注入工具", hasInjectedServerTools(request) ? "是（web_search + x_search）" : "否"],
+    ["原因", explainRouteReason(request.routeReason)],
     ["Stream", request.stream ? "是" : "否"],
     ["HTTP 状态", request.status != null ? String(request.status) : "—"],
     ["结果", request.outcome || (request.ok ? "success" : "fail")],
