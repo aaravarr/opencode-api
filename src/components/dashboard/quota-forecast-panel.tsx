@@ -43,13 +43,18 @@ function formatTokens(value: number | null | undefined) {
 }
 
 export function QuotaForecastPanel({
+  poolType: controlledPoolType,
   defaultPoolType = "all",
   compact = false,
+  showPoolFilter = true,
 }: {
+  poolType?: string;
   defaultPoolType?: string;
   compact?: boolean;
+  showPoolFilter?: boolean;
 }) {
-  const [poolType, setPoolType] = useState(defaultPoolType);
+  const [internalPoolType, setInternalPoolType] = useState(defaultPoolType);
+  const poolType = controlledPoolType ?? internalPoolType;
   const path = useMemo(() => {
     const params = new URLSearchParams({ hours: "24" });
     if (poolType && poolType !== "all") params.set("poolType", poolType);
@@ -59,23 +64,28 @@ export function QuotaForecastPanel({
   const data = resource.data;
   const points = data?.points ?? [];
   const showTokens = points.some((point) => point.availableTokens != null);
+  const poolLabel = poolOptions.find((item) => item.value === (poolType || "all"))?.label || "全部号池";
 
   return (
     <Panel
       title="未来 24 小时预计可用额度"
-      description={`主曲线按${primaryWindowLabel(data?.primaryWindow)}可用率推演；虚线是最紧窗口，柱/点表示预计可路由账号数。不预测未来新增消耗。`}
+      description={`${poolLabel} · 主曲线按${primaryWindowLabel(data?.primaryWindow)}可用率推演；虚线是最紧窗口，阶梯线是预计可路由账号数。只推演恢复，不预测未来新增消耗。`}
       action={
         <div className="flex items-center gap-2">
-          <Select value={poolType} onValueChange={setPoolType}>
-            <SelectTrigger size="sm" className="w-36">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {poolOptions.map((option) => (
-                <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {showPoolFilter ? (
+            <Select value={poolType || "all"} onValueChange={setInternalPoolType}>
+              <SelectTrigger size="sm" className="w-36">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {poolOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <span className="rounded-md border bg-white px-2 py-1 font-mono text-[11px] text-muted-foreground">{poolLabel}</span>
+          )}
           <Button variant="outline" size="sm" onClick={() => void resource.refresh()} disabled={resource.loading}>
             刷新
           </Button>

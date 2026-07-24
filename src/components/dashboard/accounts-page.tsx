@@ -30,6 +30,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { PageIntro, Panel, ErrorState, LoadingTable, EmptyState, PaginationBar, StatsStrip, formatDate } from "./page-kit";
+import { QuotaForecastPanel } from "./quota-forecast-panel";
 import { AccountBadges, BillingSafetyBadge, getPoolLabel, getPoolQuotaKinds, getQuota, PoolTypeBadge, QuotaStatus, StatusBadge } from "./status-ui";
 import { useAdminResource } from "./use-admin-resource";
 import { useAdmin } from "./admin-context";
@@ -286,6 +287,14 @@ export function AccountsPage() {
             { label: "平均用量", value: stats?.avgUsagePercent == null ? "—" : `${stats.avgUsagePercent.toFixed(2)}%`, hint: "主额度窗口均值" },
           ]}
           className="sm:grid-cols-3 xl:grid-cols-6"
+        />
+      </div>
+
+      <div className="mb-4">
+        <QuotaForecastPanel
+          poolType={poolFilter}
+          showPoolFilter={false}
+          compact
         />
       </div>
 
