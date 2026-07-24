@@ -9,6 +9,8 @@ import { getLogSettings, getSystemSettings, type LogSettings } from "./settings"
 import type { QuotaKind } from "./types"
 import { collectRequestHeaders } from "./client-meta"
 import { captureJsonResponse, ensureStreamUsage, extractBodyError, extractUsage, isLogOk, safeCloneBody, teeAndCapture, type CaptureResult, type TokenUsage } from "./capture"
+import { convertChatJsonToResponses, convertChatStreamToResponses, prepareChatRequestBody, prepareResponsesRequestBody, remapResponsesSuccessBody, remapResponsesSuccessStream, rememberResponsesTurn, type PrepareResponsesResult } from "./responses/pipeline"
+import type { CodexToolContext } from "./responses/codex-chat-compat"
 import { tryGetProvider, getProviderRegistry, type UpstreamErrorClassification } from "./providers"
 import { resolveMirrorUrl } from "./api-fetch"
 import { upsertLocalRollingUsage } from "./quota-usage"
@@ -236,7 +238,7 @@ export class GatewayService {
   // code that passes a custom fetcher will bypass mirrors, which is fine
   // since tests use mocked responses.
 
-  async handle(request: Request, endpoint: string): Promise<Response> {
+  async handle(request: Request, endpoint: string, options?: { raw?: boolean }): Promise<Response> {
     const t0 = Date.now()
     const auth = request.headers.get("authorization")
     const plaintext = auth?.startsWith("Bearer ") ? auth.slice(7) : request.headers.get("x-api-key") ?? ""
@@ -272,11 +274,47 @@ export class GatewayService {
     const meta = collectRequestHeaders(request.headers)
 
     let upstreamBytes: Uint8Array<ArrayBuffer> | null = requestBytes
-    if (stream && logging && requestBodyJson && typeof requestBodyJson === "object") {
-      const rewritten = ensureStreamUsage(requestBodyJson)
-      upstreamBytes = new TextEncoder().encode(JSON.stringify(rewritten))
+    let responsesToolContext: CodexToolContext | undefined
+    let responsesProcessMeta: PrepareResponsesResult["meta"] | undefined
+    let responsesRoute: "responses" | "chat" = "responses"
+    let responsesRouteReason: string | undefined
+    let responsesModelHint: string | undefined
+    let effectiveEndpoint = endpoint
+    const processResponses = endpoint === "responses" && options?.raw !== true
+    const processChat = endpoint === "chat/completions" && options?.raw !== true
+
+    if (requestBodyJson && typeof requestBodyJson === "object") {
+      if (processResponses) {
+        const prepared = await prepareResponsesRequestBody(requestBodyJson, {
+          injectServerTools: undefined,
+          isCompact: false,
+          db: this.db,
+        })
+        responsesToolContext = prepared.toolContext
+        responsesProcessMeta = prepared.meta
+        responsesRoute = prepared.route
+        responsesRouteReason = prepared.routeReason
+        responsesModelHint = prepared.modelHint
+        requestBodyJson = prepared.body
+        if (typeof (prepared.body as { stream?: unknown }).stream === "boolean") {
+          stream = (prepared.body as { stream?: boolean }).stream === true
+        }
+        if (prepared.route === "chat") effectiveEndpoint = "chat/completions"
+        upstreamBytes = new TextEncoder().encode(JSON.stringify(prepared.body))
+      } else if (processChat) {
+        const prepared = prepareChatRequestBody(requestBodyJson)
+        requestBodyJson = prepared
+        if (typeof (prepared as { stream?: unknown }).stream === "boolean") {
+          stream = (prepared as { stream?: boolean }).stream === true
+        }
+        upstreamBytes = new TextEncoder().encode(JSON.stringify(prepared))
+      } else if (stream && logging) {
+        const rewritten = ensureStreamUsage(requestBodyJson, endpoint === "responses" ? "responses" : "chat")
+        upstreamBytes = new TextEncoder().encode(JSON.stringify(rewritten))
+      }
     }
 
+    const chatFallbackUsed = processResponses && responsesRoute === "chat"
     const routing = new RoutingService(apiKey.ownerUserId, this.db)
     routing.setModel(model)
     this.db.prepare("INSERT INTO gateway_requests(id,owner_user_id,api_key_id,endpoint,model,started_at,stream,api_key_prefix,client,user_agent,origin,request_size_bytes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
@@ -287,7 +325,7 @@ export class GatewayService {
 
     while (true) {
       let selection
-      try { selection = routing.select(requestId, endpoint, tried) } catch (cause) {
+      try { selection = routing.select(requestId, effectiveEndpoint, tried) } catch (cause) {
         if (cause instanceof NoEligibleAccountError) {
           const exhausted = cause.reason === "EXHAUSTED" || (tried.size > permanentlyDisabled.size)
           const status = exhausted ? 429 : 503
@@ -319,7 +357,7 @@ export class GatewayService {
           }
           const upstreamModel = provider.resolveModel(selection.account, model ?? "")
           const target = provider.buildForwardTarget({
-            method: request.method, endpoint, model: model ?? "", upstreamModel,
+            method: request.method, endpoint: effectiveEndpoint, model: model ?? "", upstreamModel,
             body: upstreamBytes, headers: request.headers,
             signal: AbortSignal.any([request.signal, AbortSignal.timeout(getSystemSettings(this.db).upstreamRequestTimeoutMs)]),
           }, credential, selection.account)
@@ -332,10 +370,10 @@ export class GatewayService {
           })
         } else {
           const credential = await this.credentials.get(apiKey.ownerUserId, selection.account.id)
-          const path = endpoint.replace(/^\/+/, "")
+          const path = effectiveEndpoint.replace(/^\/+/, "")
           upstream = await this.fetcher(resolveMirrorUrl(`${selection.target.baseUrl}/${path}`), {
             method: request.method,
-            headers: upstreamHeaders(request, credential.goApiKey, endpoint),
+            headers: upstreamHeaders(request, credential.goApiKey, effectiveEndpoint),
             body: upstreamBytes,
             redirect: "error",
             signal: AbortSignal.any([request.signal, AbortSignal.timeout(getSystemSettings(this.db).upstreamRequestTimeoutMs)]),
@@ -401,11 +439,50 @@ export class GatewayService {
               this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, r.error ?? null, selection.account.name)
               this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: isLogOk(status, r.error) ? 1 : 0, latencyMs, localPrepMs: upstreamStartedAt - t0, firstTokenMs, usage: r.usage, error: r.error, accountId: selection.account.id, accountName: selection.account.name, responseSizeBytes: r.responseBytes ?? null, logSettings, requestBodyJson, responseBody: r.response, responseTruncated: r.responseTruncated, meta })
             }
-            return new Response(teeAndCapture(rebuilt, onComplete), { status, headers: responseHeaders(upstream.headers) })
+            let outStream: ReadableStream<Uint8Array> = teeAndCapture(rebuilt, (r) => {
+              onComplete(r)
+              if (processResponses && responsesProcessMeta) {
+                void rememberResponsesTurn({
+                  responsePayload: r.response,
+                  continuityKeys: responsesProcessMeta.continuityKeys,
+                  userMessages: responsesProcessMeta.userMessages,
+                  preferredMode: chatFallbackUsed ? "chat" : "responses",
+                  db: this.db,
+                })
+              }
+            })
+            if (chatFallbackUsed) outStream = convertChatStreamToResponses(outStream, responsesModelHint, responsesToolContext)
+            else if (processResponses && responsesToolContext) outStream = remapResponsesSuccessStream(outStream, responsesToolContext)
+            const headers = responseHeaders(upstream.headers)
+            if (chatFallbackUsed) {
+              headers.set("x-grok-fallback", "chat_completions")
+              headers.set("x-grok-fallback-from", "/v1/responses")
+              headers.set("x-grok-fallback-to", "/v1/chat/completions")
+              if (responsesRouteReason) headers.set("x-grok-fallback-reason", responsesRouteReason)
+            }
+            return new Response(outStream, { status, headers })
           }
           this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, null, selection.account.name)
           this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: 1, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta })
-          return new Response(rebuilt, { status, headers: responseHeaders(upstream.headers) })
+          let outStream: ReadableStream<Uint8Array> = rebuilt
+          if (chatFallbackUsed) outStream = convertChatStreamToResponses(outStream, responsesModelHint, responsesToolContext)
+          else if (processResponses && responsesToolContext) outStream = remapResponsesSuccessStream(outStream, responsesToolContext)
+          if (processResponses && responsesProcessMeta) {
+            void rememberResponsesTurn({
+              continuityKeys: responsesProcessMeta.continuityKeys,
+              userMessages: responsesProcessMeta.userMessages,
+              preferredMode: chatFallbackUsed ? "chat" : "responses",
+              db: this.db,
+            })
+          }
+          const headers = responseHeaders(upstream.headers)
+          if (chatFallbackUsed) {
+            headers.set("x-grok-fallback", "chat_completions")
+            headers.set("x-grok-fallback-from", "/v1/responses")
+            headers.set("x-grok-fallback-to", "/v1/chat/completions")
+            if (responsesRouteReason) headers.set("x-grok-fallback-reason", responsesRouteReason)
+          }
+          return new Response(outStream, { status, headers })
         }
         routing.markSuccess(selection.account.id)
         if (provider?.extractQuotaFromResponse) {
@@ -413,6 +490,61 @@ export class GatewayService {
           if (qw) this.recordPassiveQuota(selection.account.id, qw)
         }
         const status = upstream.status
+        // Non-stream JSON path for processed /v1/responses (native or chat-fallback).
+        if (processResponses && upstream.body) {
+          const reader = upstream.body.getReader()
+          const chunks: Uint8Array[] = []
+          for (;;) {
+            const next = await reader.read()
+            if (next.done) break
+            if (next.value) chunks.push(next.value)
+          }
+          let total = 0
+          for (const chunk of chunks) total += chunk.byteLength
+          const buf = new Uint8Array(total)
+          let off = 0
+          for (const chunk of chunks) { buf.set(chunk, off); off += chunk.byteLength }
+          let outBytes = buf
+          let remappedJson: unknown = undefined
+          try {
+            const json = JSON.parse(new TextDecoder().decode(buf))
+            if (chatFallbackUsed) remappedJson = convertChatJsonToResponses(json, responsesModelHint, responsesToolContext)
+            else if (responsesToolContext) remappedJson = remapResponsesSuccessBody(json, responsesToolContext)
+            else remappedJson = json
+            outBytes = new TextEncoder().encode(JSON.stringify(remappedJson))
+          } catch { /* keep original bytes */ }
+
+          if (processResponses && responsesProcessMeta) {
+            void rememberResponsesTurn({
+              responsePayload: remappedJson,
+              continuityKeys: responsesProcessMeta.continuityKeys,
+              userMessages: responsesProcessMeta.userMessages,
+              preferredMode: chatFallbackUsed ? "chat" : "responses",
+              db: this.db,
+            })
+          }
+
+          const headers = responseHeaders(upstream.headers)
+          if (chatFallbackUsed) {
+            headers.set("x-grok-fallback", "chat_completions")
+            headers.set("x-grok-fallback-from", "/v1/responses")
+            headers.set("x-grok-fallback-to", "/v1/chat/completions")
+            if (responsesRouteReason) headers.set("x-grok-fallback-reason", responsesRouteReason)
+          }
+
+          if (logging) {
+            const onComplete = (r: CaptureResult) => {
+              const latencyMs = Date.now() - t0
+              this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, r.error ?? null, selection.account.name)
+              this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: isLogOk(status, r.error) ? 1 : 0, latencyMs, localPrepMs: upstreamStartedAt - t0, usage: r.usage, error: r.error, accountId: selection.account.id, accountName: selection.account.name, responseSizeBytes: r.responseBytes ?? outBytes.byteLength, logSettings, requestBodyJson, responseBody: r.response ?? remappedJson, responseTruncated: r.responseTruncated, meta })
+            }
+            return new Response(captureJsonResponse(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(outBytes); controller.close() } }), onComplete), { status, headers })
+          }
+          this.finishAttempt(attemptId, status, "SUCCESS", null, Date.now() - attemptStartedAt, null, selection.account.name)
+          this.finalizeRequest(requestId, { status, outcome: "SUCCESS", attempts: attemptNumber, ok: 1, latencyMs: Date.now() - t0, localPrepMs: upstreamStartedAt - t0, accountId: selection.account.id, accountName: selection.account.name, logSettings, requestBodyJson, meta })
+          return new Response(outBytes, { status, headers })
+        }
+
         if (logging && upstream.body) {
           const onComplete = (r: CaptureResult) => {
             const latencyMs = Date.now() - t0

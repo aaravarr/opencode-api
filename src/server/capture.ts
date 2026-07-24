@@ -125,10 +125,21 @@ export function safeCloneBody(body: unknown, maxBytes = MAX_CAPTURE_BYTES): { va
   };
 }
 
-export function ensureStreamUsage(body: unknown): unknown {
+export function ensureStreamUsage(body: unknown, mode: "chat" | "responses" = "chat"): unknown {
   if (!body || typeof body !== "object") return body;
   const clone = { ...(body as Record<string, unknown>) };
   if (clone.stream !== true) return clone;
+  if (mode === "responses") {
+    if (clone.include_usage == null) clone.include_usage = true;
+    if (clone.stream_options && typeof clone.stream_options === "object") {
+      const prev = { ...(clone.stream_options as Record<string, unknown>) };
+      if (prev.include_usage == null) prev.include_usage = true;
+      clone.stream_options = prev;
+    } else {
+      clone.stream_options = { include_usage: true };
+    }
+    return clone;
+  }
   const streamOptions = { ...((clone.stream_options as Record<string, unknown> | undefined) ?? {}) };
   streamOptions.include_usage = true;
   clone.stream_options = streamOptions;

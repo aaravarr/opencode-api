@@ -276,6 +276,17 @@ CREATE TABLE IF NOT EXISTS provider_model_cache (
   fetched_at TEXT,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS response_conversations (
+  id TEXT PRIMARY KEY,
+  continuity_key TEXT NOT NULL UNIQUE,
+  opaque_items_json TEXT NOT NULL DEFAULT '[]',
+  messages_json TEXT NOT NULL DEFAULT '[]',
+  preferred_mode TEXT,
+  updated_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS response_conversations_updated_idx ON response_conversations(updated_at DESC);
 `
 
 export function createDatabase(filename: string): AppDatabase {
@@ -290,6 +301,7 @@ export function createDatabase(filename: string): AppDatabase {
   ensureCurrentApiKeyColumns(db)
   ensureUserColumns(db)
   ensureCurrentQuotaColumns(db)
+  ensureResponseConversationColumns(db)
   db.exec("CREATE INDEX IF NOT EXISTS accounts_provider_external_idx ON accounts(owner_user_id, pool_type, external_id)")
   return db
 }
@@ -332,6 +344,23 @@ function ensureUserColumns(db: AppDatabase): void {
   if (!cols.has("github_id")) db.exec("ALTER TABLE users ADD COLUMN github_id TEXT")
 }
 
+function ensureResponseConversationColumns(db: AppDatabase): void {
+  // Table may already exist from older builds without messages_json.
+  db.exec(`CREATE TABLE IF NOT EXISTS response_conversations (
+    id TEXT PRIMARY KEY,
+    continuity_key TEXT NOT NULL UNIQUE,
+    opaque_items_json TEXT NOT NULL DEFAULT '[]',
+    messages_json TEXT NOT NULL DEFAULT '[]',
+    preferred_mode TEXT,
+    updated_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`)
+  const cols = new Set((db.prepare("PRAGMA table_info(response_conversations)").all() as { name: string }[]).map((column) => column.name))
+  if (!cols.has("messages_json")) db.exec("ALTER TABLE response_conversations ADD COLUMN messages_json TEXT NOT NULL DEFAULT '[]'")
+  if (!cols.has("opaque_items_json")) db.exec("ALTER TABLE response_conversations ADD COLUMN opaque_items_json TEXT NOT NULL DEFAULT '[]'")
+  if (!cols.has("preferred_mode")) db.exec("ALTER TABLE response_conversations ADD COLUMN preferred_mode TEXT")
+  db.exec("CREATE INDEX IF NOT EXISTS response_conversations_updated_idx ON response_conversations(updated_at DESC)")
+}
 function ensureCurrentGatewayRequestColumns(db: AppDatabase): void {
   const requestCols = new Set((db.prepare("PRAGMA table_info(gateway_requests)").all() as { name: string }[]).map((column) => column.name))
   const requestAdditions = [
@@ -409,6 +438,7 @@ export function getDatabase(): AppDatabase {
     ensurePoolTypeColumn(globalDatabase.__opencodeApiDb)
     ensureCurrentGatewayRequestColumns(globalDatabase.__opencodeApiDb)
     ensureCurrentQuotaColumns(globalDatabase.__opencodeApiDb)
+    ensureResponseConversationColumns(globalDatabase.__opencodeApiDb)
     globalDatabase.__opencodeApiDb.exec("CREATE INDEX IF NOT EXISTS accounts_provider_external_idx ON accounts(owner_user_id, pool_type, external_id)")
     globalDatabase.__opencodeApiAccountSchemaVersion = CURRENT_ACCOUNT_SCHEMA_VERSION
   }

@@ -1,0 +1,126 @@
+import { describe, expect, it } from "vitest"
+import { createDatabase } from "../db"
+import { injectDefaultServerTools, normalizeToolsInBody } from "./tool-schema"
+import { prepareResponsesRequestBody } from "./pipeline"
+import { sanitizeResponsesInputItems, rememberConversationTurn, extractContinuityKeysFromRequest } from "./conversation-store"
+import { shouldEagerFallbackResponses } from "./responses-fallback"
+
+describe("responses tool-schema", () => {
+  it("injects default web_search and x_search", () => {
+    const body = injectDefaultServerTools({ model: "grok-4.5", input: "hi" }, { enabled: true, tools: ["web_search", "x_search"] }) as any
+    expect(body.tools).toEqual(expect.arrayContaining([{ type: "web_search" }, { type: "x_search" }]))
+  })
+
+  it("flattens nested function tools for responses mode", () => {
+    const body = normalizeToolsInBody({
+      model: "grok-4.5",
+      tools: [{ type: "function", function: { name: "lookup", description: "d", parameters: { type: "object", properties: {} } } }],
+    }, { mode: "responses" }) as any
+    expect(body.tools[0]).toMatchObject({ type: "function", name: "lookup" })
+    expect(body.tools[0].function).toBeUndefined()
+  })
+
+  it("passes through x_search server tools", () => {
+    const body = normalizeToolsInBody({
+      model: "grok-4.5",
+      tools: [{ type: "x_search" }],
+    }, { mode: "responses" }) as any
+    expect(body.tools[0]).toMatchObject({ type: "x_search" })
+  })
+})
+
+describe("responses pipeline", () => {
+  it("prepareResponsesRequestBody injects server tools and normalizes", async () => {
+    const db = createDatabase(":memory:")
+    const prepared = await prepareResponsesRequestBody({
+      model: "grok-4.5",
+      input: "Search recent posts about Elon Musk",
+      tools: [{ type: "function", function: { name: "noop", parameters: { type: "object", properties: {} } } }],
+      tool_choice: "required",
+    }, { db })
+    const tools = (prepared.body as any).tools as Array<{ type: string; name?: string }>
+    expect(prepared.route).toBe("responses")
+    expect(tools.some((t) => t.type === "web_search")).toBe(true)
+    expect(tools.some((t) => t.type === "x_search")).toBe(true)
+    expect(tools.some((t) => t.type === "function" && t.name === "noop")).toBe(true)
+    expect(prepared.meta.injectedTools).toBe(true)
+  })
+
+  it("sanitizes custom_tool_call into function_call", async () => {
+    const db = createDatabase(":memory:")
+    const result = await sanitizeResponsesInputItems({
+      model: "grok-4.5",
+      input: [{ type: "custom_tool_call", call_id: "c1", name: "apply_patch", input: "diff" }],
+    }, db)
+    expect(result.modified).toBe(true)
+    expect((result.body as any).input[0]).toMatchObject({
+      type: "function_call",
+      name: "apply_patch",
+      call_id: "c1",
+    })
+    expect(JSON.parse((result.body as any).input[0].arguments)).toEqual({ input: "diff" })
+  })
+
+  it("eager falls back to chat on foreign previous_response_id without store hit", async () => {
+    const db = createDatabase(":memory:")
+    const prepared = await prepareResponsesRequestBody({
+      model: "gpt-test",
+      previous_response_id: "resp_missing_123",
+      input: "continue",
+    }, { db, injectServerTools: false })
+    expect(prepared.route).toBe("chat")
+    expect(prepared.routeReason).toContain("foreign_previous_response_id")
+    expect((prepared.body as any).messages).toBeTruthy()
+  })
+
+  it("eager falls back to chat on foreign opaque items", async () => {
+    const db = createDatabase(":memory:")
+    const prepared = await prepareResponsesRequestBody({
+      model: "gpt-test",
+      input: [{ type: "reasoning", encrypted_content: "blob-xyz", summary: [] }],
+    }, { db, injectServerTools: false })
+    expect(prepared.route).toBe("chat")
+    expect(prepared.routeReason).toMatch(/foreign_opaque/)
+  })
+
+  it("keeps responses route when server tools preferred and no foreign residue", async () => {
+    const db = createDatabase(":memory:")
+    await rememberConversationTurn({
+      responseId: "resp_known",
+      previousKeys: ["thread:t1"],
+      preferredMode: "chat",
+      messages: [{ role: "user", content: "hi" }],
+      db,
+    })
+    const prepared = await prepareResponsesRequestBody({
+      model: "grok-4.5",
+      client_metadata: { thread_id: "t1" },
+      input: "search again",
+    }, { db })
+    // Grok injects server tools, so chat lineage should stay on responses.
+    expect(prepared.route).toBe("responses")
+    expect(prepared.routeReason).toMatch(/prefer_responses_server_tools|responses_native|session_lineage/)
+  })
+})
+
+describe("shouldEagerFallbackResponses", () => {
+  it("chat lineage without server tools eagers", () => {
+    const r = shouldEagerFallbackResponses({ model: "x", input: "hi" }, { preferredMode: "chat", preferResponsesForServerTools: false })
+    expect(r.eager).toBe(true)
+  })
+
+  it("responses lineage never eagers", () => {
+    const r = shouldEagerFallbackResponses({ model: "x", previous_response_id: "resp_1", input: "hi" }, { preferredMode: "responses", storeHit: false })
+    expect(r.eager).toBe(false)
+  })
+})
+
+describe("continuity keys", () => {
+  it("prefers thread id", () => {
+    const keys = extractContinuityKeysFromRequest({
+      client_metadata: { thread_id: "abc" },
+      previous_response_id: "resp_1",
+    })
+    expect(keys[0]).toBe("thread:abc")
+  })
+})

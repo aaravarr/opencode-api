@@ -250,4 +250,70 @@ describe("gateway logging", () => {
     expect(row.completion_tokens).toBe(8)
     expect(row.total_tokens).toBe(20)
   })
+  it("processed responses injects default server tools", async () => {
+    const { db, apiKey, credentials, hasher } = setup("xai-grok")
+    let sent: any = null
+    const fetcher = vi.fn().mockImplementation(async (_url, init) => {
+      sent = JSON.parse(new TextDecoder().decode(init.body as Uint8Array))
+      return Response.json({ id: "ok", output: [] })
+    })
+    const req = new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "grok-4.5", input: "hello" }),
+    })
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(req, "responses")
+    expect(response.status).toBe(200)
+    expect(sent.tools).toEqual(expect.arrayContaining([{ type: "web_search" }, { type: "x_search" }]))
+  })
+
+  it("raw responses does not inject default server tools", async () => {
+    const { db, apiKey, credentials, hasher } = setup("xai-grok")
+    let sent: any = null
+    const fetcher = vi.fn().mockImplementation(async (_url, init) => {
+      sent = JSON.parse(new TextDecoder().decode(init.body as Uint8Array))
+      return Response.json({ id: "ok", output: [] })
+    })
+    const req = new Request("http://localhost/raw/v1/responses", {
+      method: "POST",
+      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "grok-4.5", input: "hello" }),
+    })
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(req, "responses", { raw: true })
+    expect(response.status).toBe(200)
+    expect(sent.tools).toBeUndefined()
+  })
+  it("chat eager-fallback routes to chat/completions and returns responses shape", async () => {
+    const { db, apiKey, credentials, hasher } = setup("xai-grok")
+    let sentUrl = ""
+    let sent: any = null
+    const fetcher = vi.fn().mockImplementation(async (url, init) => {
+      sentUrl = String(url)
+      sent = JSON.parse(new TextDecoder().decode(init.body as Uint8Array))
+      return Response.json({
+        id: "chatcmpl_1",
+        object: "chat.completion",
+        model: "grok-4.5",
+        choices: [{ index: 0, message: { role: "assistant", content: "fallback-ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      })
+    })
+    const req = new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "grok-4.5",
+        previous_response_id: "resp_unknown_xyz",
+        input: "continue please",
+      }),
+    })
+    // foreign previous_response_id without store hit should eager-fallback even for Grok
+    const response = await new GatewayService(credentials, db, fetcher, hasher).handle(req, "responses")
+    expect(response.status).toBe(200)
+    expect(sentUrl).toContain("/chat/completions")
+    expect(Array.isArray(sent.messages)).toBe(true)
+    expect(response.headers.get("x-grok-fallback")).toBe("chat_completions")
+    const json = await response.json() as any
+    expect(json.object === "response" || Array.isArray(json.output) || json.output_text || json.id).toBeTruthy()
+  })
 })
